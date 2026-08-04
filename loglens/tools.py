@@ -7,39 +7,73 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from . import analysis
-from .models import LogEntry
-from .parser import load_entries
+from .parser import LoadResult, load_entries
 
 # Hard ceiling on how many entries any tool will echo back, so a large log can
 # never blow out the model's context window.
 MAX_RETURNED_ENTRIES = 100
+
+# One investigation makes several tool calls against the same file; parsing it
+# once per call is wasted work. Keyed on identity plus mtime and size so an
+# actively-written log is re-read when it changes.
+_CACHE: dict[tuple[str, int, int], LoadResult] = {}
+_CACHE_LIMIT = 4
 
 
 class _LoadError(Exception):
     """Raised when a log file can't be read, carrying a model-facing message."""
 
 
-def _load(path: str) -> tuple[list[LogEntry], int]:
+def _load(path: str) -> LoadResult:
     """Load a log file, converting filesystem errors into _LoadError."""
     target = Path(path).expanduser()
     try:
-        entries, skipped = load_entries(target)
+        stat = target.stat()
+        key = (str(target.resolve()), stat.st_mtime_ns, stat.st_size)
+        cached = _CACHE.get(key)
+        if cached is not None:
+            return cached
+        result = load_entries(target)
     except FileNotFoundError:
         raise _LoadError(f"No log file at '{path}'. Ask the user for the correct path.")
     except IsADirectoryError:
         raise _LoadError(f"'{path}' is a directory, not a log file.")
     except PermissionError:
         raise _LoadError(f"Permission denied reading '{path}'.")
+    except UnicodeDecodeError:
+        raise _LoadError(f"'{path}' is not text — it may be a binary file.")
     except OSError as exc:
         raise _LoadError(f"Could not read '{path}': {exc}")
 
-    if not entries:
+    if not result.entries:
         raise _LoadError(
-            f"Parsed no log entries from '{path}' "
-            f"({skipped} line(s) were not JSON). The file may be empty or in a "
-            "format this tool does not understand."
+            f"Parsed no log entries from '{path}' ({result.total_lines} line(s) read, "
+            f"{result.skipped} unrecognised). The file may be empty, or in a format "
+            "this tool does not understand. Supported: JSON lines, logback/log4j, "
+            "syslog, nginx error logs, and bracketed formats."
         )
-    return entries, skipped
+
+    if len(_CACHE) >= _CACHE_LIMIT:
+        _CACHE.clear()
+    _CACHE[key] = result
+    return result
+
+
+def _load_notes(result: LoadResult) -> list[str]:
+    """Caveats about the read itself that the model should know about."""
+    notes = []
+    if result.truncated:
+        notes.append(
+            f"This file is larger than the {len(result.entries)}-entry limit; "
+            "analysis covers only the entries read so far, from the start of the file."
+        )
+    if result.skipped:
+        share = result.skipped / result.total_lines * 100 if result.total_lines else 0
+        notes.append(
+            f"{result.skipped} of {result.total_lines} lines ({share:.0f}%) could not "
+            "be parsed and are excluded from these numbers."
+        )
+    return notes
 
 
 def _stamp(value) -> str:
@@ -64,15 +98,15 @@ def summarize_logs(file_path: str) -> str:
     error rate. Start here when asked to analyze or assess a log file.
     """
     try:
-        entries, skipped = _load(file_path)
+        result = _load(file_path)
     except _LoadError as exc:
         return str(exc)
 
-    s = analysis.summarize(entries, skipped)
+    s = analysis.summarize(result.entries, result.skipped)
 
     lines = [
-        f"Log file: {file_path}",
-        f"Entries parsed: {s.total}" + (f" ({s.skipped} unparseable)" if s.skipped else ""),
+        f"Log file: {file_path}  (format: {result.format_summary})",
+        f"Entries parsed: {s.total}",
         f"Time range: {_stamp(s.first_seen)} to {_stamp(s.last_seen)}"
         + (f" (span {s.duration})" if s.duration else ""),
         f"Error rate: {s.error_rate:.1f}% ({s.failures} of {s.total})",
@@ -90,6 +124,9 @@ def summarize_logs(file_path: str) -> str:
     for service, levels in ordered:
         detail = " ".join(f"{lvl}={n}" for lvl, n in sorted(levels.items()))
         lines.append(f"  {service:<24} {detail}")
+
+    for note in _load_notes(result):
+        lines += ["", f"Note: {note}"]
 
     return "\n".join(lines)
 
@@ -133,13 +170,13 @@ def search_logs(
     'timeout'. Filters combine with AND. Returns the matching entries verbatim.
     """
     try:
-        entries, _ = _load(file_path)
+        result = _load(file_path)
     except _LoadError as exc:
         return str(exc)
 
     try:
         matches, total = analysis.search(
-            entries,
+            result.entries,
             level=level,
             service=service,
             pattern=pattern,
@@ -180,11 +217,11 @@ def top_errors(file_path: str, limit: int = 10) -> str:
     is actually going wrong, ranked by frequency.
     """
     try:
-        entries, _ = _load(file_path)
+        result = _load(file_path)
     except _LoadError as exc:
         return str(exc)
 
-    groups = analysis.top_errors(entries, limit=limit)
+    groups = analysis.top_errors(result.entries, limit=limit)
     if not groups:
         return "No ERROR or FATAL entries in this log."
 
@@ -226,13 +263,13 @@ def trace_timeline(file_path: str, trace_id: str) -> str:
     that failure.
     """
     try:
-        entries, _ = _load(file_path)
+        result = _load(file_path)
     except _LoadError as exc:
         return str(exc)
 
-    steps = analysis.trace_timeline(entries, trace_id)
+    steps = analysis.trace_timeline(result.entries, trace_id)
     if not steps:
-        known = sorted({e.trace_id for e in entries if e.trace_id})[:10]
+        known = sorted({e.trace_id for e in result.entries if e.trace_id})[:10]
         hint = f" Known trace ids include: {', '.join(known)}" if known else ""
         return f"No entries with trace_id '{trace_id}'.{hint}"
 
@@ -282,11 +319,13 @@ def detect_anomalies(file_path: str, bucket_seconds: int = 60) -> str:
     to draw a conclusion.
     """
     try:
-        entries, _ = _load(file_path)
+        loaded = _load(file_path)
     except _LoadError as exc:
         return str(exc)
 
-    result = analysis.detect_anomalies(entries, bucket_seconds=max(bucket_seconds, 1))
+    result = analysis.detect_anomalies(
+        loaded.entries, bucket_seconds=max(bucket_seconds, 1)
+    )
     lines: list[str] = []
 
     if result.buckets:
@@ -321,7 +360,7 @@ def detect_anomalies(file_path: str, bucket_seconds: int = 60) -> str:
             lines.append(f"  {entry.latency_ms:>8.0f}ms  {entry.service} — {entry.message}")
         lines.append("")
 
-    for note in result.notes:
+    for note in result.notes + _load_notes(loaded):
         lines.append(f"Note: {note}")
 
     return "\n".join(lines).strip() or "Nothing notable found."

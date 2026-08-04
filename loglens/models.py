@@ -10,11 +10,19 @@ LEVELS = ("DEBUG", "INFO", "WARN", "ERROR", "FATAL")
 # Common spellings that mean the same thing as one of the above.
 LEVEL_ALIASES = {
     "WARNING": "WARN",
+    "WARNING:": "WARN",
     "ERR": "ERROR",
     "SEVERE": "ERROR",
     "CRITICAL": "FATAL",
     "CRIT": "FATAL",
     "TRACE": "DEBUG",
+    "FINE": "DEBUG",
+    "VERBOSE": "DEBUG",
+    # syslog severities
+    "EMERG": "FATAL",
+    "PANIC": "FATAL",
+    "ALERT": "FATAL",
+    "NOTICE": "INFO",
 }
 
 # Levels that count as a failure when computing error rates.
@@ -30,7 +38,10 @@ def normalize_level(level: Any) -> str:
     return value if value in LEVELS else "UNKNOWN"
 
 
-@dataclass
+# slots=True drops the per-instance __dict__. At a few hundred thousand
+# retained entries that overhead is the difference between tens and hundreds
+# of megabytes.
+@dataclass(slots=True)
 class LogEntry:
     """One log line, with the fields we analyse pulled out of the payload.
 
@@ -50,6 +61,8 @@ class LogEntry:
     exception: str | None = None
     latency_ms: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # Continuation lines belonging to this entry, e.g. a Java stack trace.
+    detail: list[str] = field(default_factory=list)
 
     @property
     def is_failure(self) -> bool:
@@ -62,4 +75,6 @@ class LogEntry:
         text = f"{stamp} {self.level:<5} {where:<22} {self.message}"
         if self.exception:
             text += f"  [{self.exception}]"
+        if self.detail:
+            text += f"  (+{len(self.detail)} line(s) of stack trace)"
         return text
