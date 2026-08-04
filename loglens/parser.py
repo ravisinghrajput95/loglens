@@ -9,10 +9,11 @@ import gzip
 import json
 import re
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, IO, Iterator
+from typing import IO, Any
 
 from .models import LogEntry, normalize_level
 
@@ -59,8 +60,11 @@ _TIMESTAMP_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y/%m/%d %H:%M:%S",
     "%d/%b/%Y:%H:%M:%S %z",  # apache/nginx access
-    "%b %d %H:%M:%S",  # syslog, no year
 )
+
+# Syslog omits the year. Parsing it yearless is deprecated from Python 3.15,
+# so the current year is prepended before parsing rather than patched in after.
+_YEARLESS_FORMATS = (("%b %d %H:%M:%S", "%Y %b %d %H:%M:%S"),)
 
 
 def _as_aware(value: datetime) -> datetime:
@@ -70,7 +74,7 @@ def _as_aware(value: datetime) -> datetime:
     and formats that don't (logback, syslog). Without a common convention the
     two are not comparable at all, so naive timestamps are read as UTC.
     """
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -85,7 +89,7 @@ def parse_timestamp(value: Any) -> datetime | None:
         # Heuristic: values past ~2001 in ms are too large to be seconds.
         seconds = value / 1000 if value > 1e11 else value
         try:
-            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+            return datetime.fromtimestamp(seconds, tz=UTC)
         except (OSError, ValueError, OverflowError):
             return None
     if not isinstance(value, str):
@@ -102,12 +106,16 @@ def parse_timestamp(value: Any) -> datetime | None:
 
     for fmt in _TIMESTAMP_FORMATS:
         try:
-            parsed = datetime.strptime(text, fmt)
+            return _as_aware(datetime.strptime(text, fmt))
         except ValueError:
             continue
-        if "%Y" not in fmt:
-            parsed = parsed.replace(year=datetime.now().year)
-        return _as_aware(parsed)
+
+    year = datetime.now().year
+    for _, dated_fmt in _YEARLESS_FORMATS:
+        try:
+            return _as_aware(datetime.strptime(f"{year} {text}", dated_fmt))
+        except ValueError:
+            continue
 
     return None
 
@@ -360,9 +368,7 @@ def iter_entries(path: str | Path) -> Iterator[LogEntry]:
         yield pending
 
 
-def load_entries(
-    path: str | Path, max_entries: int = DEFAULT_MAX_ENTRIES
-) -> LoadResult:
+def load_entries(path: str | Path, max_entries: int = DEFAULT_MAX_ENTRIES) -> LoadResult:
     """Read a log file into memory, bounded by max_entries.
 
     Streams the file rather than reading it whole, so peak memory tracks the

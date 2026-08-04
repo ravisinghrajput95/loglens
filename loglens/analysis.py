@@ -105,9 +105,7 @@ def search(
 
     if pattern:
         regex = re.compile(pattern, re.IGNORECASE)
-        matches = [
-            e for e in matches if regex.search(e.message) or regex.search(e.raw)
-        ]
+        matches = [e for e in matches if regex.search(e.message) or regex.search(e.raw)]
 
     return matches[:limit], len(matches)
 
@@ -225,9 +223,7 @@ def detect_anomalies(
         spread = statistics.pstdev(failure_counts)
         threshold = mean + spread
         spikes = [
-            (start, fails)
-            for start, _, fails in buckets
-            if fails > threshold and fails > 0
+            (start, fails) for start, _, fails in buckets if fails > threshold and fails > 0
         ]
 
     # --- latency outliers ---
@@ -236,8 +232,7 @@ def detect_anomalies(
     cutoff: float | None = None
     if len(timed) < 5:
         notes.append(
-            f"Only {len(timed)} entries carry latency_ms — "
-            "not enough to establish a baseline."
+            f"Only {len(timed)} entries carry latency_ms — not enough to establish a baseline."
         )
     else:
         values = sorted(e.latency_ms for e in timed)
@@ -250,9 +245,7 @@ def detect_anomalies(
         )
 
     # --- which services are failing most ---
-    failing: Counter = Counter(
-        e.service or "unknown" for e in entries if e.is_failure
-    )
+    failing: Counter = Counter(e.service or "unknown" for e in entries if e.is_failure)
 
     return Anomalies(
         buckets=buckets,

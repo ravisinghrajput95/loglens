@@ -34,16 +34,18 @@ def _load(path: str) -> LoadResult:
         if cached is not None:
             return cached
         result = load_entries(target)
-    except FileNotFoundError:
-        raise _LoadError(f"No log file at '{path}'. Ask the user for the correct path.")
-    except IsADirectoryError:
-        raise _LoadError(f"'{path}' is a directory, not a log file.")
-    except PermissionError:
-        raise _LoadError(f"Permission denied reading '{path}'.")
-    except UnicodeDecodeError:
-        raise _LoadError(f"'{path}' is not text — it may be a binary file.")
+    except FileNotFoundError as exc:
+        raise _LoadError(
+            f"No log file at '{path}'. Ask the user for the correct path."
+        ) from exc
+    except IsADirectoryError as exc:
+        raise _LoadError(f"'{path}' is a directory, not a log file.") from exc
+    except PermissionError as exc:
+        raise _LoadError(f"Permission denied reading '{path}'.") from exc
+    except UnicodeDecodeError as exc:
+        raise _LoadError(f"'{path}' is not text — it may be a binary file.") from exc
     except OSError as exc:
-        raise _LoadError(f"Could not read '{path}': {exc}")
+        raise _LoadError(f"Could not read '{path}': {exc}") from exc
 
     if not result.entries:
         raise _LoadError(
@@ -323,9 +325,7 @@ def detect_anomalies(file_path: str, bucket_seconds: int = 60) -> str:
     except _LoadError as exc:
         return str(exc)
 
-    result = analysis.detect_anomalies(
-        loaded.entries, bucket_seconds=max(bucket_seconds, 1)
-    )
+    result = analysis.detect_anomalies(loaded.entries, bucket_seconds=max(bucket_seconds, 1))
     lines: list[str] = []
 
     if result.buckets:
@@ -341,7 +341,9 @@ def detect_anomalies(file_path: str, bucket_seconds: int = 60) -> str:
     if result.spike_buckets:
         lines.append(
             "Error spikes at: "
-            + ", ".join(f"{s.strftime('%H:%M:%S')} ({n} failures)" for s, n in result.spike_buckets)
+            + ", ".join(
+                f"{s.strftime('%H:%M:%S')} ({n} failures)" for s, n in result.spike_buckets
+            )
         )
         lines.append("")
 

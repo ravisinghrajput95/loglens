@@ -1,12 +1,14 @@
 """Agent construction: the model, the tools, and the operating instructions."""
 
+import os
+
 from langchain.agents import create_agent
 from langchain_ollama import ChatOllama
 
 from .tools import TOOLS
 
-DEFAULT_MODEL = "llama3.2"
-DEFAULT_BASE_URL = "http://localhost:11434"
+DEFAULT_MODEL = os.environ.get("LOGLENS_MODEL", "llama3.2")
+DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 SYSTEM_PROMPT = """
 You are an expert DevOps and Site Reliability Engineering assistant specializing in production incident investigation, log analysis, and root cause analysis.
