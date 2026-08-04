@@ -1,0 +1,25 @@
+{"timestamp":"2026-07-30T20:15:31.001Z","level":"INFO","service":"api-gateway","host":"api-01","message":"Incoming POST request to /api/v1/chat","trace_id":"b10a4f5e","request_id":"req-9c3f21"}
+{"timestamp":"2026-07-30T20:15:31.047Z","level":"INFO","service":"auth-service","host":"auth-01","message":"JWT token validated successfully","trace_id":"b10a4f5e","user_id":"usr-1024"}
+{"timestamp":"2026-07-30T20:15:31.214Z","level":"INFO","service":"agent-service","host":"agent-02","message":"Intent classified as kubernetes_troubleshooting","trace_id":"b10a4f5e","confidence":0.98}
+{"timestamp":"2026-07-30T20:15:31.661Z","level":"INFO","service":"vector-db","host":"vectordb-01","message":"Retrieved 5 documents from knowledge base","trace_id":"b10a4f5e","latency_ms":118}
+{"timestamp":"2026-07-30T20:15:32.412Z","level":"WARN","service":"api-gateway","host":"api-01","message":"Rate limit threshold reached (85%) for client 192.168.10.42","trace_id":"b10a4f5e"}
+{"timestamp":"2026-07-30T20:15:33.048Z","level":"INFO","service":"llm-service","host":"gpu-node-01","message":"Prompt submitted to inference engine","trace_id":"b10a4f5e","model":"llama3.3:70b"}
+{"timestamp":"2026-07-30T20:15:36.947Z","level":"INFO","service":"llm-service","host":"gpu-node-01","message":"Inference completed successfully","trace_id":"b10a4f5e","latency_ms":3897}
+{"timestamp":"2026-07-30T20:16:05.119Z","level":"INFO","service":"cache-service","host":"redis-01","message":"Cache hit for conversation history","trace_id":"c92d11e4","cache_key":"conv:88129"}
+{"timestamp":"2026-07-30T20:16:22.603Z","level":"WARN","service":"database","host":"postgres-01","message":"Connection pool utilization exceeded 90%","trace_id":"c92d11e4","active_connections":91}
+{"timestamp":"2026-07-30T20:16:45.442Z","level":"INFO","service":"scheduler","host":"worker-01","message":"Nightly cleanup job started","trace_id":"sys-a102"}
+{"timestamp":"2026-07-30T20:16:47.992Z","level":"INFO","service":"scheduler","host":"worker-01","message":"Removed 342 expired sessions","trace_id":"sys-a102"}
+{"timestamp":"2026-07-30T20:17:00.003Z","level":"ERROR","service":"order-service","host":"order-02","message":"Failed to publish event to Kafka topic orders-v1","trace_id":"f82b719c","exception":"TimeoutException: Topic orders-v1 not acknowledged after 5000ms"}
+{"timestamp":"2026-07-30T20:17:05.850Z","level":"WARN","service":"order-service","host":"order-02","message":"Circuit breaker switched to OPEN state","trace_id":"f82b719c","dependency":"KafkaCluster"}
+{"timestamp":"2026-07-30T20:17:08.414Z","level":"ERROR","service":"notification-service","host":"notify-01","message":"SMTP server connection refused","trace_id":"f82b719c","exception":"java.net.ConnectException: Connection refused"}
+{"timestamp":"2026-07-30T20:17:15.627Z","level":"INFO","service":"notification-service","host":"notify-01","message":"Retry scheduled after 30 seconds","trace_id":"f82b719c"}
+{"timestamp":"2026-07-30T20:18:10.011Z","level":"WARN","service":"storage-service","host":"storage-01","message":"Disk utilization exceeded warning threshold","trace_id":"sys-b331","disk_usage_percent":88}
+{"timestamp":"2026-07-30T20:18:26.502Z","level":"ERROR","service":"storage-service","host":"storage-01","message":"Unable to write backup archive","trace_id":"sys-b331","exception":"No space left on device"}
+{"timestamp":"2026-07-30T20:19:02.721Z","level":"INFO","service":"health-service","host":"monitor-01","message":"Health check completed","trace_id":"health-01","status":"UP"}
+{"timestamp":"2026-07-30T20:19:28.116Z","level":"WARN","service":"security-service","host":"sec-01","message":"Multiple failed login attempts detected","trace_id":"sec-77","source_ip":"203.0.113.55","attempts":7}
+{"timestamp":"2026-07-30T20:19:51.307Z","level":"ERROR","service":"payment-service","host":"payment-01","message":"Payment gateway returned HTTP 503","trace_id":"pay-341","exception":"GatewayUnavailableException"}
+{"timestamp":"2026-07-30T20:20:11.948Z","level":"INFO","service":"payment-service","host":"payment-01","message":"Automatic retry succeeded","trace_id":"pay-341","latency_ms":742}
+{"timestamp":"2026-07-30T20:20:48.721Z","level":"WARN","service":"kubernetes-controller","host":"cluster-master","message":"Pod restarted 5 times within 10 minutes","trace_id":"k8s-991","pod":"inventory-api-74f6d7b9f8-xr82h","namespace":"production"}
+{"timestamp":"2026-07-30T20:21:03.614Z","level":"ERROR","service":"kubernetes-controller","host":"cluster-master","message":"Pod entered CrashLoopBackOff","trace_id":"k8s-991","pod":"inventory-api-74f6d7b9f8-xr82h","namespace":"production","exit_code":1}
+{"timestamp":"2026-07-30T20:21:36.122Z","level":"INFO","service":"metrics-service","host":"prometheus-01","message":"Metrics scraped successfully","trace_id":"metrics-18","targets":42}
+{"timestamp":"2026-07-30T20:22:01.901Z","level":"INFO","service":"api-gateway","host":"api-01","message":"Completed request","trace_id":"b10a4f5e","status":200,"latency_ms":4870}
