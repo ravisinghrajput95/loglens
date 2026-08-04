@@ -5,6 +5,8 @@ import sys
 
 from . import __version__
 from .agent import DEFAULT_BASE_URL, DEFAULT_MODEL, build_agent
+from .tools import TOOLS
+from .verify import format_report, verify
 
 BANNER = """LogLens {version} — log analysis agent
 model: {model} via {base_url}
@@ -42,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Ollama endpoint (default: {DEFAULT_BASE_URL}, env: OLLAMA_BASE_URL).",
     )
     parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip checking that quoted passages appear in the tool output.",
+    )
+    parser.add_argument(
         "--no-stream",
         action="store_true",
         help="Wait for the complete answer instead of streaming it.",
@@ -71,20 +78,40 @@ def _report(exc: Exception, model: str, base_url: str) -> None:
         print(hint, file=sys.stderr)
 
 
-def ask(agent, history: list, question: str, stream: bool) -> list:
+def _check(answer: str, tool_outputs: list[str], tool_names: list[str]) -> None:
+    """Warn about quoted passages the tools never returned."""
+    if not answer or not tool_outputs:
+        return
+    report = verify(answer, tool_outputs, allow=tool_names)
+    warning = format_report(report)
+    if warning:
+        print("\n" + warning, file=sys.stderr, flush=True)
+
+
+def ask(agent, history: list, question: str, stream: bool, check: bool = True) -> list:
     """Send one question, print the answer, and return the updated history.
 
     History is threaded back in so follow-up questions like 'what about the
     payment service?' resolve against what was already established. Only the
     question and the answer are kept: replaying tool traffic would grow the
     context quickly without helping the model answer the next question.
+
+    Tool output is collected as it goes so the finished answer can be checked
+    against it — see loglens.verify.
     """
     messages = history + [("user", question)]
+    tool_outputs: list[str] = []
+    tool_names = [t.name for t in TOOLS]
 
     if not stream:
         result = agent.invoke({"messages": messages})
+        for message in result["messages"]:
+            if getattr(message, "type", None) == "tool":
+                tool_outputs.append(str(message.content))
         answer = result["messages"][-1].content
         print(answer)
+        if check:
+            _check(answer, tool_outputs, tool_names)
         return messages + [("assistant", answer)]
 
     # Tool calls are announced on stderr as they happen, so a multi-step
@@ -97,17 +124,27 @@ def ask(agent, history: list, question: str, stream: bool) -> list:
                 print(f"  · {call['name']}", file=sys.stderr, flush=True)
 
         content = getattr(chunk, "content", "")
-        if metadata.get("langgraph_node") == "model" and content:
+        if not content:
+            continue
+
+        node = metadata.get("langgraph_node")
+        if node == "model":
             print(content, end="", flush=True)
             parts.append(content)
+        elif node == "tools":
+            tool_outputs.append(str(content))
 
     if parts:
         print()
 
-    return messages + [("assistant", "".join(parts))]
+    answer = "".join(parts)
+    if check:
+        _check(answer, tool_outputs, tool_names)
+
+    return messages + [("assistant", answer)]
 
 
-def interactive(agent, model: str, base_url: str, stream: bool) -> int:
+def interactive(agent, model: str, base_url: str, stream: bool, check: bool = True) -> int:
     print(BANNER.format(version=__version__, model=model, base_url=base_url))
     history: list = []
 
@@ -124,7 +161,7 @@ def interactive(agent, model: str, base_url: str, stream: bool) -> int:
             return 0
 
         try:
-            history = ask(agent, history, question, stream)
+            history = ask(agent, history, question, stream, check)
         except KeyboardInterrupt:
             print("\n(interrupted)", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 — reported, not swallowed
@@ -134,6 +171,7 @@ def interactive(agent, model: str, base_url: str, stream: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     stream = not args.no_stream
+    check = not args.no_verify
 
     try:
         agent = build_agent(model=args.model, base_url=args.base_url)
@@ -146,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.question:
         try:
-            ask(agent, [], " ".join(args.question), stream)
+            ask(agent, [], " ".join(args.question), stream, check)
         except KeyboardInterrupt:
             return 130
         except Exception as exc:  # noqa: BLE001
@@ -159,10 +197,10 @@ def main(argv: list[str] | None = None) -> int:
         if not question:
             print("No question given.", file=sys.stderr)
             return 1
-        ask(agent, [], question, stream)
+        ask(agent, [], question, stream, check)
         return 0
 
-    return interactive(agent, args.model, args.base_url, stream)
+    return interactive(agent, args.model, args.base_url, stream, check)
 
 
 if __name__ == "__main__":

@@ -147,6 +147,81 @@ class TestMain:
         assert captured == {"model": "qwen3", "base_url": "http://elsewhere:11434"}
 
 
+class TestVerificationWiring:
+    """The check must run on real answers, using what the tools returned."""
+
+    def _chunks(self, tool_text, answer):
+        return [
+            (Chunk(tool_text), {"langgraph_node": "tools"}),
+            (Chunk(answer), {"langgraph_node": "model"}),
+        ]
+
+    def test_fabricated_quote_warns_on_stderr(self, capsys, monkeypatch):
+        agent = FakeAgent()
+        chunks = self._chunks(
+            "Entries parsed: 25\nError rate: 20.0%",
+            "Evidence: `2026-07-30 20:15:31 INFO [k8s] [main] Starting controller`",
+        )
+        monkeypatch.setattr(agent, "stream", lambda p, stream_mode=None: iter(chunks))
+
+        cli.ask(agent, [], "why?", stream=True, check=True)
+        captured = capsys.readouterr()
+        assert "do not appear in the tool output" in captured.err
+        # The answer itself is still shown; the warning is advisory.
+        assert "Starting controller" in captured.out
+
+    def test_grounded_quote_produces_no_warning(self, capsys, monkeypatch):
+        agent = FakeAgent()
+        chunks = self._chunks(
+            "example: Failed to publish event to Kafka topic orders-v1",
+            "Evidence: `Failed to publish event to Kafka topic orders-v1`",
+        )
+        monkeypatch.setattr(agent, "stream", lambda p, stream_mode=None: iter(chunks))
+
+        cli.ask(agent, [], "why?", stream=True, check=True)
+        assert "do not appear" not in capsys.readouterr().err
+
+    def test_no_verify_disables_the_check(self, capsys, monkeypatch):
+        agent = FakeAgent()
+        chunks = self._chunks("counts only", "Evidence: `an entirely invented log line`")
+        monkeypatch.setattr(agent, "stream", lambda p, stream_mode=None: iter(chunks))
+
+        cli.ask(agent, [], "why?", stream=True, check=False)
+        assert "do not appear" not in capsys.readouterr().err
+
+    def test_non_streaming_path_is_checked_too(self, capsys, monkeypatch):
+        class ToolMessage:
+            type = "tool"
+            content = "Entries parsed: 25"
+
+        agent = FakeAgent()
+        monkeypatch.setattr(
+            agent,
+            "invoke",
+            lambda p: {
+                "messages": [
+                    ToolMessage(),
+                    Message("Evidence: `a completely fabricated log line here`"),
+                ]
+            },
+        )
+        cli.ask(agent, [], "why?", stream=False, check=True)
+        assert "do not appear in the tool output" in capsys.readouterr().err
+
+    def test_no_tool_output_means_no_warning(self, capsys, monkeypatch):
+        """Nothing was retrieved, so there is nothing to check against."""
+        agent = FakeAgent()
+        chunks = [(Chunk("just prose `with a quoted span here`"), {"langgraph_node": "model"})]
+        monkeypatch.setattr(agent, "stream", lambda p, stream_mode=None: iter(chunks))
+
+        cli.ask(agent, [], "why?", stream=True, check=True)
+        assert "do not appear" not in capsys.readouterr().err
+
+    def test_flag_is_parsed(self):
+        assert cli.build_parser().parse_args(["--no-verify", "q"]).no_verify is True
+        assert cli.build_parser().parse_args(["q"]).no_verify is False
+
+
 class TestErrorHints:
     """A hint should point at the actual problem, not a plausible-sounding one."""
 

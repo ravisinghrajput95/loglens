@@ -92,6 +92,7 @@ loglens --base-url http://gpu-box:11434 "Summarize ./app.log"
 | Model | `-m`, `--model` | `LOGLENS_MODEL` | `gemma4` |
 | Ollama endpoint | `--base-url` | `OLLAMA_BASE_URL` | `http://localhost:11434` |
 | Streaming | `--no-stream` to disable | — | on |
+| Answer verification | `--no-verify` to disable | — | on |
 
 Tool calls print to stderr and the answer to stdout, so `loglens "..." > report.md` captures the report without the progress noise.
 
@@ -137,6 +138,23 @@ The system prompt forbids inventing log entries, but a prompt alone doesn't achi
 - Tools report their own limits. Too few time buckets to judge a spike, too few `latency_ms` samples for a baseline, a file truncated by the cap — each is stated rather than papered over.
 - Failures come back as text the model can relay. A missing file or a bad regex returns a message instead of raising, so a mistake produces a useful reply rather than a crash.
 - The parser refuses to guess. A prose sentence containing the word "error" is not counted as an ERROR entry.
+- **Every answer is checked against the tool output before you see it.** Each quoted passage is compared with what the tools actually returned; anything that does not appear is reported as possibly invented. This runs automatically and needs no cooperation from the model, which is the point — a model that fabricates will not admit to it.
+
+```
+$ loglens -m llama3.2 "Analyze ./app.log. What broke and why?"
+  · summarize_logs
+
+Warning: 8 of 8 quoted passages do not appear in the tool output.
+The model may have invented them:
+  - 2026-07-30 20:15:31 INFO [kubernetes-controller] [main] Starting controller
+  - 2026-07-30 20:16:01 ERROR [kubernetes-controller] [main] Failed to create pod
+  ...
+Treat those as unverified. A stronger model usually fixes this.
+```
+
+That is a real run. `llama3.2` called one tool that returns counts and no log lines, then invented eight entries in a format this JSON file never uses. The same question to `gemma4` produces no warning at all — its quotes come from what it retrieved. Disable the check with `--no-verify`.
+
+The check is deliberately narrow: it verifies quoted passages, not paraphrase or arithmetic. A model can still summarize wrongly without quoting anything. What it does catch is the failure that matters most during an incident — invented evidence that reads exactly like a real log line.
 
 **The model is still the weak link, and model choice matters more than you would expect.** The tools are deterministic; the narration around them is not.
 
@@ -152,9 +170,7 @@ Measured on the sample log, asking for the most serious problem and its cause:
 
 Asked a short question — *"Analyze ./app.log. What broke and why?"* — `llama3.2` called only `summarize_logs`, which returns counts and no log lines, and then **invented eight log entries** and quoted them as evidence, in a text format this JSON file does not use. Strengthening the system prompt did not fix it. Given a longer, more explicit question it used three tools and behaved well, so its failure depends on how you phrase the request, which is not a property you want to rely on during an incident.
 
-A tool that fabricates evidence is worse than no tool, so the default is the model that was not observed doing it. If you want speed and will read the output critically, `-m llama3.2` answers in seconds — just ask detailed questions, and treat quoted log lines as unverified.
-
-This is the honest limit of the current design: the tools cannot be made to lie, but nothing yet checks that the model's final answer only quotes what the tools returned.
+A tool that fabricates evidence is worse than no tool, so the default is the model that was not observed doing it. `-m llama3.2` answers in seconds if you want speed, and the verification pass above will tell you when to distrust it.
 
 ---
 
@@ -162,7 +178,7 @@ This is the honest limit of the current design: the tools cannot be made to lie,
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 151 tests
+pytest              # 181 tests
 ruff check . && ruff format --check .
 ```
 
@@ -175,6 +191,7 @@ loglens/
 ├── analysis.py   pure functions — the actual analysis
 ├── tools.py      LangChain tools wrapping those functions
 ├── agent.py      model wiring and system prompt
+├── verify.py     checks answers only quote what the tools returned
 └── cli.py        argument parsing, interactive session, streaming
 ```
 
