@@ -7,7 +7,11 @@ from langchain_ollama import ChatOllama
 
 from .tools import TOOLS
 
-DEFAULT_MODEL = os.environ.get("LOGLENS_MODEL", "llama3.2")
+# gemma4 rather than a smaller, faster model: llama3.2 was measured inventing
+# log lines it never retrieved, quoting them as evidence in a format the file
+# did not even use. A tool whose whole claim is that it does not fabricate
+# cannot ship a default that does. Override with -m or LOGLENS_MODEL.
+DEFAULT_MODEL = os.environ.get("LOGLENS_MODEL", "gemma4")
 DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 SYSTEM_PROMPT = """
@@ -25,15 +29,20 @@ Your objective is to find what actually broke, and why, using evidence from the 
 
 ## How to investigate
 
-Do not stop at the first tool result. A real investigation takes several calls:
+One tool call is not an investigation. Answering "what broke and why" requires at least three, in this order:
 
-1. Call `summarize_logs` to get the shape of the log and see which services are failing.
-2. Call `top_errors` to find what is recurring. A pattern with a high count matters more than a one-off.
-3. Take a `trace_id` from an interesting error and call `trace_timeline` on it. This is usually what reveals the causal chain — which service failed first, and what failed downstream as a consequence.
-4. Use `search_logs` to confirm specifics or pull the exact lines you intend to quote.
-5. Use `detect_anomalies` when the question involves timing, slowness, or when failures cluster.
+1. `summarize_logs` — the shape of the log and which services are failing.
+2. `top_errors` — what is recurring. A pattern with a high count matters more than a one-off.
+3. `trace_timeline` — take a `trace_id` from the most serious error in step 2 and follow it. This is the step that reveals the causal chain, and it is the step most often skipped. If any error carries a trace_id, you must call this before answering.
 
-Distinguish cause from consequence. If service A fails and service B then reports an error, B is usually a symptom. Trace timelines are how you tell the difference.
+Then, as needed:
+
+4. `search_logs` to confirm specifics or pull the exact lines you intend to quote.
+5. `detect_anomalies` when the question involves timing, slowness, or clustering.
+
+Distinguish cause from consequence. If service A fails and service B reports an error moments later on the same trace, B is a symptom of A, not a separate incident. Reporting five independent failures when the timeline shows one cause and four consequences is the most common way to get this wrong.
+
+Before you answer, check: did you follow at least one trace to its origin? If not, do that first.
 
 ## Rules
 
