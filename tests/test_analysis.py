@@ -35,7 +35,6 @@ class TestSignature:
     @pytest.mark.parametrize(
         "left,right",
         [
-            ("Payment gateway returned HTTP 503", "Payment gateway returned HTTP 502"),
             ("Pod inventory-api-74f6 crashed", "Pod inventory-api-91ab crashed"),
             ("Timeout from 10.0.0.1", "Timeout from 192.168.1.7"),
             ("Request b10a4f5e failed", "Request c92d11e4 failed"),
@@ -47,6 +46,19 @@ class TestSignature:
 
     def test_genuinely_different_errors_stay_separate(self):
         assert analysis.signature("Disk full") != analysis.signature("Network down")
+
+    @pytest.mark.parametrize(
+        "left,right",
+        [
+            ("Gateway returned HTTP 503", "Gateway returned HTTP 404"),
+            ("Pod exited with exit_code 137", "Pod exited with exit_code 1"),
+            ("Upstream status 500", "Upstream status 429"),
+        ],
+    )
+    def test_status_and_exit_codes_are_not_collapsed(self, left, right):
+        """A 503 is an outage, a 404 is a bad route and a 429 is throttling.
+        Merging them into 'HTTP <N>' reports three incidents as one."""
+        assert analysis.signature(left) != analysis.signature(right)
 
     def test_whitespace_is_collapsed(self):
         assert analysis.signature("a   b\tc") == "a b c"
@@ -202,7 +214,20 @@ class TestDetectAnomalies:
     def test_too_few_buckets_reports_instead_of_guessing(self):
         result = analysis.detect_anomalies([entry(level="ERROR")], bucket_seconds=60)
         assert result.spike_buckets == []
-        assert any("too few" in note.lower() for note in result.notes)
+        assert any("bucket" in note.lower() for note in result.notes)
+
+    def test_steady_failures_are_not_reported_as_a_spike(self):
+        """mean + sigma flagged ordinary variation. A flat failure rate is not
+        an anomaly however many failures it contains."""
+        entries = [entry(level="ERROR", offset=minute * 60) for minute in range(20)]
+        result = analysis.detect_anomalies(entries, bucket_seconds=60)
+        assert result.spike_buckets == []
+
+    def test_a_real_burst_is_still_found(self):
+        entries = [entry(level="ERROR", offset=minute * 60) for minute in range(20)]
+        entries += [entry(level="ERROR", offset=7 * 60 + i) for i in range(30)]
+        result = analysis.detect_anomalies(entries, bucket_seconds=60)
+        assert len(result.spike_buckets) == 1
 
     def test_too_little_latency_data_reports_instead_of_guessing(self):
         result = analysis.detect_anomalies([entry(latency_ms=100)])

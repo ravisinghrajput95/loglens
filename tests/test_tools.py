@@ -72,7 +72,8 @@ class TestSearchLogs:
             "\n".join(f'{{"level":"ERROR","message":"failure {i}"}}' for i in range(500))
         )
         out = search_logs.invoke({"file_path": str(path), "level": "ERROR", "limit": 10_000})
-        assert len(out.splitlines()) <= tools.MAX_RETURNED_ENTRIES + 2
+        # entries + header + the fence notice and its two delimiter lines
+        assert len(out.splitlines()) <= tools.MAX_RETURNED_ENTRIES + 5
 
     def test_no_matches_is_not_an_error(self, json_log):
         out = search_logs.invoke({"file_path": json_log, "service": "nonexistent"})

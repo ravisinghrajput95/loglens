@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from . import __version__
+from . import __version__, tools
 from .agent import DEFAULT_BASE_URL, DEFAULT_MODEL, build_agent
 from .tools import TOOLS
 from .verify import format_report, verify
@@ -42,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-url",
         default=DEFAULT_BASE_URL,
         help=f"Ollama endpoint (default: {DEFAULT_BASE_URL}, env: OLLAMA_BASE_URL).",
+    )
+    parser.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Do not strip credentials and personal data from log lines. "
+        "Only for logs you know are clean; roughly halves parse time.",
     )
     parser.add_argument(
         "--no-verify",
@@ -172,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     stream = not args.no_stream
     check = not args.no_verify
+    tools.REDACT_SECRETS = not args.no_redact
 
     try:
         agent = build_agent(model=args.model, base_url=args.base_url)

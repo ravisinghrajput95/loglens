@@ -21,16 +21,48 @@ _NOISE_PATTERNS = (
 )
 
 
+# Numbers that carry meaning rather than noise. An HTTP 503 is an upstream
+# outage, a 404 is a bad route and a 429 is throttling; collapsing them to
+# "HTTP <N>" merges three different incidents into one pattern. The same goes
+# for exit codes and signals.
+_MEANINGFUL_NUMBER = re.compile(
+    r"\b(?:http|https|status(?:[ _-]?code)?|code|response|exit(?:[ _-]?code)?|"
+    r"signal|errno)\b\W{0,3}(\d{1,3})\b",
+    re.I,
+)
+_KEEP = "\x00KEEP{}\x00"
+
+# A bucket must sit this many scaled MADs above the median to count as a spike.
+# Three is the usual robust-statistics choice: high enough that routine
+# variation does not trip it, low enough to catch a real burst.
+SPIKE_THRESHOLD_MADS = 3.0
+
+# Below this many buckets the median and MAD are not meaningful.
+MIN_BUCKETS_FOR_SPIKES = 5
+
+
 def signature(message: str) -> str:
     """Collapse the variable parts of a message so equivalent errors group.
 
     'Connection timeout after 5000ms to postgres-01' and
     'Connection timeout after 3000ms to postgres-04' both become
     'Connection timeout after <N>ms to <NAME>'.
+
+    Status and exit codes are held back from that collapsing, because they
+    distinguish failures rather than describing the same one.
     """
-    text = message
+    kept: list[str] = []
+
+    def hold(match: re.Match) -> str:
+        kept.append(match.group(1))
+        return match.group(0).replace(match.group(1), _KEEP.format(len(kept) - 1))
+
+    text = _MEANINGFUL_NUMBER.sub(hold, message)
     for pattern, placeholder in _NOISE_PATTERNS:
         text = pattern.sub(placeholder, text)
+    for index, value in enumerate(kept):
+        text = text.replace(_KEEP.format(index), value)
+
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -78,6 +110,60 @@ def summarize(entries: list[LogEntry], skipped: int = 0) -> Summary:
     )
 
 
+# Nested quantifiers are what turn a regex into a hang: (a+)+ against a long
+# non-matching string backtracks exponentially. Python's re has no timeout and
+# a catastrophic match holds the GIL, so it cannot be cancelled from another
+# thread — the pattern has to be refused before it runs.
+_NESTED_QUANTIFIER = re.compile(r"[)\]]\s*[*+]|\([^)]*[*+][^)]*\)\s*[*+{]")
+_MAX_PATTERN_LENGTH = 200
+
+# Longest single line handed to a user-supplied regex. A pathological pattern
+# costs time proportional to input length; bounding the input bounds the harm.
+_MAX_MATCH_LENGTH = 4_000
+
+
+class UnsafePattern(ValueError):
+    """Raised for a regex that could take unbounded time to evaluate."""
+
+
+def compile_pattern(pattern: str) -> re.Pattern:
+    """Compile a search pattern, refusing shapes that can hang the process."""
+    if len(pattern) > _MAX_PATTERN_LENGTH:
+        raise UnsafePattern(
+            f"pattern is {len(pattern)} characters; the limit is {_MAX_PATTERN_LENGTH}"
+        )
+    if _NESTED_QUANTIFIER.search(pattern):
+        raise UnsafePattern(
+            "pattern nests one repetition inside another, e.g. (a+)+, which can "
+            "take exponential time. Rewrite it without the nested repetition."
+        )
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def in_window(
+    entries: list[LogEntry],
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[LogEntry]:
+    """Restrict to a time window.
+
+    Entries without a timestamp are dropped when a window is given: including
+    them would silently mix unplaceable events into a bounded question.
+    """
+    if since is None and until is None:
+        return entries
+    kept = []
+    for entry in entries:
+        if entry.timestamp is None:
+            continue
+        if since and entry.timestamp < since:
+            continue
+        if until and entry.timestamp > until:
+            continue
+        kept.append(entry)
+    return kept
+
+
 def search(
     entries: list[LogEntry],
     level: str | None = None,
@@ -85,9 +171,11 @@ def search(
     pattern: str | None = None,
     trace_id: str | None = None,
     limit: int = 50,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> tuple[list[LogEntry], int]:
     """Filter entries. Returns the capped results and the total match count."""
-    matches = entries
+    matches = in_window(entries, since, until)
 
     if level:
         wanted = level.strip().upper()
@@ -104,8 +192,13 @@ def search(
         matches = [e for e in matches if e.trace_id == trace_id]
 
     if pattern:
-        regex = re.compile(pattern, re.IGNORECASE)
-        matches = [e for e in matches if regex.search(e.message) or regex.search(e.raw)]
+        regex = compile_pattern(pattern)
+        matches = [
+            e
+            for e in matches
+            if regex.search(e.message[:_MAX_MATCH_LENGTH])
+            or regex.search(e.raw[:_MAX_MATCH_LENGTH])
+        ]
 
     return matches[:limit], len(matches)
 
@@ -213,18 +306,38 @@ def detect_anomalies(
 
     spikes: list[tuple[datetime, int]] = []
     failure_counts = [fails for _, _, fails in buckets]
-    if len(buckets) < 3:
+    if len(buckets) < MIN_BUCKETS_FOR_SPIKES:
         notes.append(
-            f"Only {len(buckets)} time bucket(s) of {bucket_seconds}s — "
-            "too few to judge whether error rate is spiking."
+            f"Only {len(buckets)} time bucket(s) of {bucket_seconds}s — at least "
+            f"{MIN_BUCKETS_FOR_SPIKES} are needed before a burst can be told apart "
+            "from ordinary variation."
         )
     elif any(failure_counts):
-        mean = statistics.mean(failure_counts)
-        spread = statistics.pstdev(failure_counts)
-        threshold = mean + spread
-        spikes = [
-            (start, fails) for start, _, fails in buckets if fails > threshold and fails > 0
-        ]
+        # Median absolute deviation rather than mean and standard deviation.
+        # Log arrivals are bursty and far from normal, and a spike drags the
+        # mean up towards itself — so mean+sigma partly hides the event it is
+        # meant to find, while flagging ordinary variation the rest of the
+        # time. MAD is unmoved by a minority of extreme values.
+        median = statistics.median(failure_counts)
+        mad = statistics.median([abs(count - median) for count in failure_counts])
+        scale = mad * 1.4826  # rescale so the threshold is sigma-comparable
+
+        if scale == 0:
+            # Every bucket is identical, so MAD cannot express a distance.
+            # Anything above that flat baseline is the anomaly.
+            spikes = [(start, fails) for start, _, fails in buckets if fails > median]
+        else:
+            spikes = [
+                (start, fails)
+                for start, _, fails in buckets
+                if fails > median and (fails - median) / scale >= SPIKE_THRESHOLD_MADS
+            ]
+
+        if not spikes:
+            notes.append(
+                "Failures are spread evenly rather than clustered — no bucket "
+                "stands out from the baseline."
+            )
 
     # --- latency outliers ---
     timed = [e for e in entries if e.latency_ms is not None]

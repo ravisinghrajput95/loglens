@@ -8,14 +8,16 @@ all four while holding memory bounded.
 import gzip
 import json
 import re
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO, Any
 
-from .models import LogEntry, normalize_level
+from .models import FAILURE_LEVELS, LogEntry, normalize_level
+from .redact import redact
+from .safety import detect_injection
 
 # Upper bound on entries held in memory from a single file. Large enough that
 # ordinary logs are never affected, small enough that a runaway file cannot
@@ -276,16 +278,52 @@ def parse_text_line(line: str, line_no: int = 0) -> tuple[LogEntry | None, str]:
     return None, ""
 
 
-def parse_line(line: str, line_no: int = 0) -> LogEntry | None:
+def sanitize(
+    entry: LogEntry, redact_secrets: bool = True, counts: Counter | None = None
+) -> LogEntry:
+    """Flag injection attempts and strip credentials, in that order.
+
+    Injection detection runs on the original text: redaction rewrites parts of
+    a line and could otherwise hide the phrasing that gives an attempt away.
+    """
+    findings = detect_injection(entry.message) or detect_injection(entry.raw)
+    if findings:
+        entry.injection = tuple(sorted({f.kind for f in findings}))
+
+    if redact_secrets:
+        # `raw` holds the same content as `message` in serialized form, so it
+        # is cleaned but not counted — otherwise every secret is reported twice.
+        entry.raw = redact(entry.raw).text
+        for field_name in ("message", "exception"):
+            value = getattr(entry, field_name)
+            if value:
+                result = redact(value)
+                setattr(entry, field_name, result.text)
+                if counts is not None:
+                    counts.update(result.counts)
+        if entry.detail:
+            cleaned = []
+            for line in entry.detail:
+                result = redact(line)
+                cleaned.append(result.text)
+                if counts is not None:
+                    counts.update(result.counts)
+            entry.detail = cleaned
+
+    return entry
+
+
+def parse_line(line: str, line_no: int = 0, redact_secrets: bool = True) -> LogEntry | None:
     """Parse a single line in any supported format."""
     stripped = line.strip()
     if not stripped:
         return None
     entry = parse_json_line(stripped, line_no)
-    if entry is not None:
-        return entry
-    entry, _ = parse_text_line(stripped, line_no)
-    return entry
+    if entry is None:
+        entry, _ = parse_text_line(stripped, line_no)
+    if entry is None:
+        return None
+    return sanitize(entry, redact_secrets)
 
 
 # --------------------------------------------------------------------------
@@ -302,13 +340,31 @@ def open_log(path: Path) -> IO[str]:
 
 @dataclass
 class LoadResult:
-    """Everything a caller needs to describe what was read, and honestly."""
+    """What was read, and honestly.
+
+    `entries` holds detail for at most `max_entries` lines. The `total_*`
+    fields are accumulated over the entire file, so counts and rates stay
+    correct even when detail had to be dropped.
+    """
 
     entries: list[LogEntry]
     total_lines: int = 0
+    total_entries: int = 0
     skipped: int = 0
     truncated: bool = False
     formats: Counter = field(default_factory=Counter)
+    total_by_level: Counter = field(default_factory=Counter)
+    redactions: Counter = field(default_factory=Counter)
+    suspicious: int = 0
+
+    @property
+    def total_failures(self) -> int:
+        return sum(self.total_by_level.get(level, 0) for level in FAILURE_LEVELS)
+
+    @property
+    def error_rate(self) -> float:
+        """Failure rate over the whole file, not just the retained window."""
+        return (self.total_failures / self.total_entries * 100) if self.total_entries else 0.0
 
     @property
     def format_summary(self) -> str:
@@ -322,7 +378,7 @@ def _is_continuation(line: str) -> bool:
 
     The header of a Java stack trace ("java.net.SocketTimeoutException: ...")
     sits flush against the left margin, so indentation alone is not enough to
-    recognise it — and it is the single most useful line in the trace.
+    recognise it — and it is the line that names the real exception.
     """
     return bool(_CONTINUATION.match(line) or _EXCEPTION_HEADER.match(line.strip()))
 
@@ -336,66 +392,72 @@ def _absorb(entry: LogEntry, line: str) -> None:
             entry.exception = header.group("exc").strip()
 
 
-def iter_entries(path: str | Path) -> Iterator[LogEntry]:
-    """Stream entries from a log file one line at a time.
+def iter_entries(path: str | Path, redact_secrets: bool = True) -> Iterator[LogEntry]:
+    """Stream entries one at a time, in file order, with bounded memory.
 
-    Continuation lines (stack traces) are folded into the entry above them, so
-    an entry is only yielded once the following line proves it complete.
+    An entry is only yielded once the following line proves it complete, so
+    continuation lines land on the entry they belong to.
     """
-    target = Path(path)
     pending: LogEntry | None = None
 
-    with open_log(target) as handle:
+    with open_log(Path(path)) as handle:
         for line_no, raw in enumerate(handle, start=1):
             line = raw.rstrip("\n\r")
             if not line.strip():
                 continue
 
-            entry = parse_line(line, line_no)
+            stripped = line.strip()
+            entry = parse_json_line(stripped, line_no)
+            if entry is None:
+                entry, _ = parse_text_line(stripped, line_no)
 
             if entry is None:
-                # Either a stack trace line belonging to the entry above, or
-                # something we can't read at all; neither starts a new entry.
                 if pending is not None and _is_continuation(line):
-                    _absorb(pending, line.strip())
+                    _absorb(pending, stripped)
                 continue
 
             if pending is not None:
-                yield pending
+                yield sanitize(pending, redact_secrets)
             pending = entry
 
     if pending is not None:
-        yield pending
+        yield sanitize(pending, redact_secrets)
 
 
-def load_entries(path: str | Path, max_entries: int = DEFAULT_MAX_ENTRIES) -> LoadResult:
-    """Read a log file into memory, bounded by max_entries.
+def load_entries(
+    path: str | Path,
+    max_entries: int = DEFAULT_MAX_ENTRIES,
+    redact_secrets: bool = True,
+) -> LoadResult:
+    """Read a log file, keeping counts for all of it and detail for the tail.
 
-    Streams the file rather than reading it whole, so peak memory tracks the
-    number of retained entries, not the size of the file on disk.
+    The earlier version kept the *first* max_entries lines and dropped the
+    rest. Incidents are at the end of a log, so that discarded exactly the
+    part worth reading and reported rates from the least relevant window.
+
+    Now the whole file is streamed: level counts, formats and redactions
+    accumulate over every line, while retained detail is the most recent
+    max_entries entries.
     """
-    target = Path(path)
-    entries: list[LogEntry] = []
-    formats: Counter = Counter()
-    total_lines = 0
+    result = LoadResult(entries=[])
+    retained: deque[LogEntry] = deque(maxlen=max(max_entries, 1))
     parsed_lines = 0
-    truncated = False
-
     pending: LogEntry | None = None
 
-    def keep(entry: LogEntry) -> bool:
-        """Append an entry; returns False once the cap is reached."""
-        if len(entries) >= max_entries:
-            return False
-        entries.append(entry)
-        return True
+    def complete(entry: LogEntry) -> None:
+        sanitize(entry, redact_secrets, result.redactions)
+        result.total_entries += 1
+        result.total_by_level[entry.level] += 1
+        if entry.suspicious:
+            result.suspicious += 1
+        retained.append(entry)
 
-    with open_log(target) as handle:
+    with open_log(Path(path)) as handle:
         for line_no, raw in enumerate(handle, start=1):
             line = raw.rstrip("\n\r")
             if not line.strip():
                 continue
-            total_lines += 1
+            result.total_lines += 1
 
             stripped = line.strip()
             entry = parse_json_line(stripped, line_no)
@@ -410,21 +472,48 @@ def load_entries(path: str | Path, max_entries: int = DEFAULT_MAX_ENTRIES) -> Lo
                 continue
 
             parsed_lines += 1
-            formats[fmt] += 1
+            result.formats[fmt] += 1
 
-            if pending is not None and not keep(pending):
-                truncated = True
-                pending = None
-                break
+            if pending is not None:
+                complete(pending)
             pending = entry
 
-    if pending is not None and not keep(pending):
-        truncated = True
+    if pending is not None:
+        complete(pending)
 
-    return LoadResult(
-        entries=entries,
-        total_lines=total_lines,
-        skipped=total_lines - parsed_lines,
-        truncated=truncated,
-        formats=formats,
-    )
+    result.entries = list(retained)
+    result.skipped = result.total_lines - parsed_lines
+    result.truncated = result.total_entries > len(result.entries)
+    return result
+
+
+_RELATIVE = re.compile(r"^(\d+)\s*([smhdw])$", re.I)
+_RELATIVE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def parse_time_spec(value: str | None, now: datetime | None = None) -> datetime | None:
+    """Parse a time window bound.
+
+    Accepts an absolute timestamp in any format the log parser understands, or
+    a relative offset into the past such as '30m', '2h', '7d'. Relative values
+    are what a responder actually types, and are resolved against `now`.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    match = _RELATIVE.match(text)
+    if match:
+        amount, unit = int(match.group(1)), match.group(2).lower()
+        base = now or datetime.now(UTC)
+        return base - timedelta(seconds=amount * _RELATIVE_UNITS[unit])
+
+    parsed = parse_timestamp(text)
+    if parsed is None:
+        raise ValueError(
+            f"could not read '{value}' as a time. Use an absolute timestamp "
+            "such as 2026-07-30T20:15:00Z, or a relative offset such as 30m, 2h or 7d."
+        )
+    return parsed
