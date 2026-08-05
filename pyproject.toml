@@ -44,6 +44,11 @@ exclude = ["evals*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repository root must be importable so tests can reach evals/, which is
+# deliberately not packaged. Without this, `pytest` works only when invoked as
+# `python -m pytest`, which silently adds the current directory — a difference
+# that passed locally and failed in CI.
+pythonpath = ["."]
 addopts = "-q --strict-markers"
 filterwarnings = ["error::DeprecationWarning"]
 
