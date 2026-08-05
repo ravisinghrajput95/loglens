@@ -517,3 +517,28 @@ def parse_time_spec(value: str | None, now: datetime | None = None) -> datetime 
             "such as 2026-07-30T20:15:00Z, or a relative offset such as 30m, 2h or 7d."
         )
     return parsed
+
+
+def restrict(result: LoadResult, entries: list[LogEntry]) -> LoadResult:
+    """A LoadResult describing only `entries`, with totals recomputed.
+
+    Applying a time window and leaving the whole-file counters in place would
+    report a rate for a period the user did not ask about. Counts must always
+    describe the same set of entries the report is about.
+    """
+    by_level: Counter = Counter()
+    for entry in entries:
+        by_level[entry.level] += 1
+
+    return LoadResult(
+        entries=entries,
+        total_lines=result.total_lines,
+        total_entries=len(entries),
+        skipped=result.skipped,
+        # A window is an explicit choice, not a limit that was hit.
+        truncated=False,
+        formats=result.formats,
+        total_by_level=by_level,
+        redactions=result.redactions,
+        suspicious=sum(1 for e in entries if e.suspicious),
+    )

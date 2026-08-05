@@ -7,6 +7,17 @@ from . import __version__, tools
 from .agent import DEFAULT_BASE_URL, DEFAULT_MODEL, build_agent
 from .verify import format_report, suspicious_ids, verify
 
+USAGE = """LogLens {version} — log triage, with optional AI narration
+
+  loglens report FILE            a full triage report, instantly, no model needed
+  loglens report FILE --explain  the same report, then narrated by a local model
+  loglens ask "question"         ask the agent a question about a log
+  loglens                        interactive session
+
+`report` needs nothing installed but Python. `ask` and `--explain` need Ollama.
+Run `loglens report --help` or `loglens ask --help` for the options of each.
+"""
+
 BANNER = """LogLens {version} — log analysis agent
 model: {model} via {base_url}
 
@@ -20,11 +31,37 @@ Type 'exit' or press Ctrl-D to quit.
 EXIT_WORDS = {"exit", "quit", ":q", "bye"}
 
 
+def build_report_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="loglens report",
+        description="Print a deterministic triage report for a log file.",
+        epilog="Computed entirely in Python. --explain adds narration from a model.",
+    )
+    parser.add_argument("file", help="Path to the log file (.log or .log.gz).")
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="Also narrate the report using a local model (needs Ollama).",
+    )
+    parser.add_argument("--since", help="Only entries at or after this time (30m, 2h, ISO).")
+    parser.add_argument("--until", help="Only entries at or before this time.")
+    parser.add_argument(
+        "--bucket", type=int, default=60, help="Anomaly bucket size in seconds."
+    )
+    parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument("--no-redact", action="store_true")
+    parser.add_argument("--no-verify", action="store_true")
+    parser.add_argument("--no-stream", action="store_true")
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loglens",
         description="Investigate log files with a local LLM.",
-        epilog="With no question, loglens starts an interactive session.",
+        epilog="With no question, loglens starts an interactive session. "
+        "See `loglens report --help` for the no-model report.",
     )
     parser.add_argument(
         "question",
@@ -172,7 +209,92 @@ def interactive(agent, model: str, base_url: str, stream: bool, check: bool = Tr
             _report(exc, model, base_url)
 
 
+def report_command(argv: list[str]) -> int:
+    """Print a deterministic report, optionally narrated."""
+    from .analysis import in_window
+    from .parser import load_entries, parse_time_spec, restrict
+    from .report import render
+
+    args = build_report_parser().parse_args(argv)
+
+    try:
+        since = parse_time_spec(args.since)
+        until = parse_time_spec(args.until)
+    except ValueError as exc:
+        print(f"Invalid time range: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        result = load_entries(args.file, redact_secrets=not args.no_redact)
+    except FileNotFoundError:
+        print(f"No log file at '{args.file}'.", file=sys.stderr)
+        return 1
+    except IsADirectoryError:
+        print(f"'{args.file}' is a directory, not a log file.", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"Could not read '{args.file}': {exc}", file=sys.stderr)
+        return 1
+
+    if not result.entries:
+        print(
+            f"No log entries recognised in '{args.file}' ({result.total_lines} line(s) read).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if since or until:
+        windowed = in_window(result.entries, since, until)
+        if not windowed:
+            print("No entries in that time range.", file=sys.stderr)
+            return 1
+        if result.truncated:
+            print(
+                "Note: the file was larger than the retained window, so a time "
+                "filter can only see the most recent entries.",
+                file=sys.stderr,
+            )
+        result = restrict(result, windowed)
+
+    text = render(result, args.file, bucket_seconds=args.bucket)
+    print(text)
+
+    if not args.explain:
+        return 0
+
+    from .explain import explain
+
+    print("\nEXPLANATION")
+    print("─" * 78)
+    try:
+        explain(
+            text,
+            model=args.model,
+            base_url=args.base_url,
+            stream=not args.no_stream,
+            check=not args.no_verify,
+        )
+    except Exception as exc:  # noqa: BLE001 — reported, not raised
+        _report(exc, args.model, args.base_url)
+        # The report itself already printed and is still valid.
+        return 1
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # Subcommands are dispatched before argparse so that `loglens "a question"`
+    # keeps working — the question is a positional, not a subcommand.
+    if argv and argv[0] == "report":
+        return report_command(argv[1:])
+    if argv and argv[0] == "ask":
+        argv = argv[1:]
+    if argv and argv[0] in ("help", "--usage"):
+        print(USAGE.format(version=__version__))
+        return 0
+
     args = build_parser().parse_args(argv)
     stream = not args.no_stream
     check = not args.no_verify

@@ -1,35 +1,76 @@
 # LogLens
 
-An AI log analysis agent for incident investigation. It runs against a local LLM through [Ollama](https://ollama.com); by default nothing leaves your machine, and credentials are stripped from log text before the model ever sees it.
+Fast, deterministic log triage — with optional AI narration that has to cite its evidence.
 
-> Pointing `--base-url` at a remote Ollama sends log content to that host. The default is `localhost`.
+**Two ways to use it, and the first needs no model at all.**
 
-The point of LogLens is that the analysis lives in real tools, not in the model. The LLM decides *what to look at*; deterministic Python decides *what is true*. That division is what keeps it from inventing findings.
+```bash
+$ loglens report app.log            # instant, deterministic, no LLM
+$ loglens report app.log --explain  # the same report, then narrated by a local model
+$ loglens "why did checkout fail?"  # ask an agent, which picks its own tools
+```
 
-Real output, abridged:
+The analysis is ordinary Python: counts, groupings, timelines. A model is never required to produce a fact, only to interpret one. That division is the whole design.
+
+## `loglens report` — half a second, no dependencies beyond Python
 
 ```
-$ loglens "Analyze ./app.log. What broke and why?"
-  · summarize_logs
-  · top_errors
-  · trace_timeline
+app.log  (json (25))
+25 entries · 6m30s · 20.0% errors · 5/16 services failing
+2026-07-30 20:15:31 → 20:22:01
 
-**Summary**
-The system experienced significant instability, characterized by a 20.0%
-error rate across multiple services. The most critical and traceable issue
-is a failure in event publishing from the order-service to Kafka, which
-appears to trigger cascading failures in downstream services like
-notification-service.
+LEVELS
+──────────────────────────────────────────────────────────────────────────
+  INFO          14  ████████████████████████
+  WARN           6  ██████████
+  ERROR          5  █████████
 
-**Findings**
-*  Primary Failure (Order Service): failed due to a Kafka connectivity
-   timeout. Evidence: error pattern `Failed to publish event to Kafka topic
-   orders-v1` with `TimeoutException: Topic orders-v1 not acknowledged
-   after 5000ms`.
-*  Cascading Failure (Notification Service): SMTP connection failure.
-   Evidence: during trace reconstruction for trace_id f82b719c, the
-   timeline shows a subsequent error hop ...
+SERVICES
+──────────────────────────────────────────────────────────────────────────
+ ! order-service                 1 failing   error=1 warn=1
+ ! notification-service          1 failing   error=1 info=1
+ ! storage-service               1 failing   error=1 warn=1
+   api-gateway                   0 failing   info=2 warn=1
+
+ERROR PATTERNS
+──────────────────────────────────────────────────────────────────────────
+  [1x] Failed to publish event to Kafka topic <NAME>
+        order-service  20:17:00–20:17:00  first at [L12]
+        TimeoutException: Topic orders-v1 not acknowledged after 5000ms
+  [1x] SMTP server connection refused
+        notification-service  20:17:08–20:17:08  first at [L14]
+
+TRACES CONTAINING FAILURES
+──────────────────────────────────────────────────────────────────────────
+  f82b719c  —  4 steps across 2 service(s), 15.6s, 2 failure(s)
+     start    [L12] ERROR order-service        Failed to publish to Kafka  <-- FAILURE
+   +   5847ms [L13] WARN  order-service        Circuit breaker OPEN
+   +   2564ms [L14] ERROR notification-service SMTP connection refused     <-- FAILURE
+   +   7213ms [L15] INFO  notification-service Retry scheduled after 30s
+
+CAVEATS
+──────────────────────────────────────────────────────────────────────────
+  Redacted before analysis: jwt x1, email x1.
 ```
+
+That last trace is the point. The SMTP failure looks like a separate incident until you see it sitting 2.5 seconds downstream of the Kafka timeout on the same request.
+
+## `--explain` — narration over facts already established
+
+The report is computed first, then handed to a local model as **one call** rather than an agent loop. The model cannot call the wrong tool, cannot stop early, and has every line id already in front of it — so its citations verify exactly. Cheaper and more reliable than letting it drive.
+
+Every claim it makes must cite a line id like `[L12]`, and those citations are checked afterwards:
+
+```
+FABRICATED CITATIONS: the answer cites L1, L2, L3, which the tools never
+returned. Those claims rest on nothing.
+```
+
+## `loglens "question"` — the agent
+
+For open-ended questions where you don't know what to look at yet, the agent chooses among five tools and investigates. Slower, more flexible, same verification.
+
+---
 
 ---
 
@@ -62,7 +103,7 @@ This is what separates a cause from its symptoms. The SMTP failure looks like an
 
 ## Install
 
-Requires Python 3.11+ and a running Ollama.
+Requires Python 3.11+. **Ollama is only needed for `--explain` and the agent** — `loglens report` runs on a clean Python install.
 
 ```bash
 git clone https://github.com/ravisinghrajput95/loglens.git
@@ -71,14 +112,19 @@ cd loglens
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e .
 
-ollama pull gemma4
-ollama serve
+# Optional — only for --explain and the agent
+ollama pull gemma4 && ollama serve
 ```
 
 ## Use
 
 ```bash
-# One question
+# The report — no model involved
+loglens report app.log
+loglens report app.log --since 2h          # only the last two hours
+loglens report app.log --explain           # add narration
+
+# One question to the agent
 loglens "Analyze ./app.log and tell me the root cause"
 
 # Interactive session — follow-up questions keep their context
@@ -242,7 +288,7 @@ Known blind spots: 5/5 wrong answers pass unflagged. These are not counted above
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 290 tests
+pytest              # 316 tests
 python -m evals.run
 ruff check . && ruff format --check .
 ```
