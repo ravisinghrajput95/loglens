@@ -542,3 +542,50 @@ def restrict(result: LoadResult, entries: list[LogEntry]) -> LoadResult:
         redactions=result.redactions,
         suspicious=sum(1 for e in entries if e.suspicious),
     )
+
+
+def load_many(
+    paths: list[str | Path],
+    max_entries: int = DEFAULT_MAX_ENTRIES,
+    redact_secrets: bool = True,
+) -> LoadResult:
+    """Read several logs as one timeline.
+
+    An incident usually spans services, and their logs are usually separate
+    files. Merging them in time order is what lets a trace be followed across
+    the boundary — the single most useful thing this tool does, and impossible
+    while it could only see one file.
+
+    Line numbers repeat across files, so merged entries are renumbered for
+    citation. Each entry keeps its file and original line for display.
+    """
+    if len(paths) == 1:
+        return load_entries(paths[0], max_entries, redact_secrets)
+
+    merged: list[LogEntry] = []
+    combined = LoadResult(entries=[])
+
+    for path in paths:
+        target = Path(path)
+        result = load_entries(target, max_entries, redact_secrets)
+        for entry in result.entries:
+            entry.source = target.name
+        merged.extend(result.entries)
+
+        combined.total_lines += result.total_lines
+        combined.total_entries += result.total_entries
+        combined.skipped += result.skipped
+        combined.truncated = combined.truncated or result.truncated
+        combined.formats.update(result.formats)
+        combined.total_by_level.update(result.total_by_level)
+        combined.redactions.update(result.redactions)
+        combined.suspicious += result.suspicious
+
+    # Undated entries sort last: they cannot be placed on the timeline, and
+    # interleaving them arbitrarily would imply an order that is not known.
+    merged.sort(key=lambda e: (e.timestamp is None, e.timestamp, e.source, e.line_no))
+    for index, entry in enumerate(merged, start=1):
+        entry.uid = index
+
+    combined.entries = merged
+    return combined

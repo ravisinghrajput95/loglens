@@ -35,7 +35,10 @@ CITATION = re.compile(r"\[L(\d+)\]")
 # Sentence-ish units. Splitting on terminators and list markers keeps bullet
 # points, which carry most findings, as separate claims.
 _CLAIM_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
-_LIST_MARKER = re.compile(r"^\s*(?:[-*+•]|\d+[.)]|\*\*?)\s*")
+# Bullets and numbered markers only. An earlier version also stripped a bare
+# "**", which chewed the opening of a bold heading — "**Why**" was reported
+# back to the user as "*Why**".
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+•]\s+|\d+[.)]\s+)")
 
 # A claim short enough to be a heading or a fragment carries no assertion worth
 # checking. "**Summary**" and "Recommendations" should not be demanded to cite.

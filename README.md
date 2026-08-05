@@ -5,9 +5,10 @@ Fast, deterministic log triage — with optional AI narration that has to cite i
 **Two ways to use it, and the first needs no model at all.**
 
 ```bash
-$ loglens report app.log            # instant, deterministic, no LLM
-$ loglens report app.log --explain  # the same report, then narrated by a local model
-$ loglens "why did checkout fail?"  # ask an agent, which picks its own tools
+$ loglens report app.log             # instant, deterministic, no LLM
+$ loglens report logs/*.log          # several services merged into one timeline
+$ loglens report app.log --explain   # the same report, narrated by a local model
+$ loglens "why did checkout fail?"   # ask an agent, which picks its own tools
 ```
 
 The analysis is ordinary Python: counts, groupings, timelines. A model is never required to produce a fact, only to interpret one. That division is the whole design.
@@ -55,9 +56,40 @@ CAVEATS
 
 That last trace is the point. The SMTP failure looks like a separate incident until you see it sitting 2.5 seconds downstream of the Kafka timeout on the same request.
 
+## Several files, one timeline
+
+Incidents span services and their logs are separate files. Pass them all and they merge in time order, which is what lets a request be followed across the boundary:
+
+```
+$ loglens report logs/gateway.log logs/orders.log logs/inventory.log
+3 files  (json (5), logback (3))
+8 entries · 31s · 50.0% errors · 3/3 services failing
+
+FILES
+──────────────────────────────────────────────────────────────────────────
+ ! orders.log                          3 entries     2 failing
+ ! gateway.log                         3 entries     1 failing
+ ! inventory.log                       2 entries     1 failing
+
+  Traces crossing file boundaries:
+  chk-99  spans gateway.log, inventory.log (contains failures)
+
+TRACES CONTAINING FAILURES
+──────────────────────────────────────────────────────────────────────────
+  chk-99  —  4 steps across 2 service(s), 8.4s, 2 failure(s)
+     start    [L1] INFO  api-gateway   POST /checkout received
+   +   1100ms [L3] INFO  inventory     Reserve request received
+   +   4900ms [L4] ERROR inventory     Connection timeout to postgres-01  <-- FAILURE
+   +   2400ms [L7] ERROR api-gateway   Upstream returned 502 for /checkout <-- FAILURE
+```
+
+Files may be in different formats — the example above mixes JSON and logback. Line numbers repeat across files, so merged entries are renumbered for citation while each keeps its own `file:line` for you to go and look at.
+
 ## `--explain` — narration over facts already established
 
-The report is computed first, then handed to a local model as **one call** rather than an agent loop. The model cannot call the wrong tool, cannot stop early, and has every line id already in front of it — so its citations verify exactly. Cheaper and more reliable than letting it drive.
+The report is computed first, then handed to a local model as **one call** rather than an agent loop. The model cannot call the wrong tool, cannot stop early, and has every line id already in front of it — so its citations verify exactly. Cheaper and more reliable than letting it drive: **around 30 seconds against `gemma4`, versus roughly 200 for the agent path** on the same log.
+
+Given the three-file example above, it identified the `SQLTimeoutException` in inventory as the root cause and the gateway 502 as its downstream symptom, citing both.
 
 Every claim it makes must cite a line id like `[L12]`, and those citations are checked afterwards:
 
@@ -288,7 +320,7 @@ Known blind spots: 5/5 wrong answers pass unflagged. These are not counted above
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 316 tests
+pytest              # 335 tests
 python -m evals.run
 ruff check . && ruff format --check .
 ```

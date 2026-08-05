@@ -37,7 +37,12 @@ def build_report_parser() -> argparse.ArgumentParser:
         description="Print a deterministic triage report for a log file.",
         epilog="Computed entirely in Python. --explain adds narration from a model.",
     )
-    parser.add_argument("file", help="Path to the log file (.log or .log.gz).")
+    parser.add_argument(
+        "file",
+        nargs="+",
+        help="Log file(s) to read. Several are merged into one timeline, which "
+        "is how a trace can be followed across services.",
+    )
     parser.add_argument(
         "--explain",
         action="store_true",
@@ -212,7 +217,7 @@ def interactive(agent, model: str, base_url: str, stream: bool, check: bool = Tr
 def report_command(argv: list[str]) -> int:
     """Print a deterministic report, optionally narrated."""
     from .analysis import in_window
-    from .parser import load_entries, parse_time_spec, restrict
+    from .parser import load_many, parse_time_spec, restrict
     from .report import render
 
     args = build_report_parser().parse_args(argv)
@@ -224,16 +229,20 @@ def report_command(argv: list[str]) -> int:
         print(f"Invalid time range: {exc}", file=sys.stderr)
         return 2
 
+    label = args.file[0] if len(args.file) == 1 else f"{len(args.file)} files"
     try:
-        result = load_entries(args.file, redact_secrets=not args.no_redact)
-    except FileNotFoundError:
-        print(f"No log file at '{args.file}'.", file=sys.stderr)
+        result = load_many(args.file, redact_secrets=not args.no_redact)
+    except FileNotFoundError as exc:
+        print(f"No log file at '{exc.filename or args.file[0]}'.", file=sys.stderr)
         return 1
-    except IsADirectoryError:
-        print(f"'{args.file}' is a directory, not a log file.", file=sys.stderr)
+    except IsADirectoryError as exc:
+        print(
+            f"'{exc.filename or args.file[0]}' is a directory, not a log file.",
+            file=sys.stderr,
+        )
         return 1
     except OSError as exc:
-        print(f"Could not read '{args.file}': {exc}", file=sys.stderr)
+        print(f"Could not read log: {exc}", file=sys.stderr)
         return 1
 
     if not result.entries:
@@ -256,7 +265,7 @@ def report_command(argv: list[str]) -> int:
             )
         result = restrict(result, windowed)
 
-    text = render(result, args.file, bucket_seconds=args.bucket)
+    text = render(result, label, bucket_seconds=args.bucket)
     print(text)
 
     if not args.explain:

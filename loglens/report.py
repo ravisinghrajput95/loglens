@@ -38,6 +38,60 @@ def _section(title: str) -> list[str]:
     return ["", title.upper(), RULE]
 
 
+def sources(entries) -> list[str]:
+    """Which files contributed, when more than one was read."""
+    counts: dict[str, int] = {}
+    failures: dict[str, int] = {}
+    for entry in entries:
+        if not entry.source:
+            continue
+        counts[entry.source] = counts.get(entry.source, 0) + 1
+        if entry.is_failure:
+            failures[entry.source] = failures.get(entry.source, 0) + 1
+
+    if len(counts) < 2:
+        return []
+
+    # Failures first, then volume, then name — so ties resolve the same way
+    # every run rather than following dictionary insertion order.
+    ordered = sorted(
+        counts.items(),
+        key=lambda kv: (-failures.get(kv[0], 0), -kv[1], kv[0]),
+    )
+    lines = []
+    for name, total in ordered:
+        bad = failures.get(name, 0)
+        marker = "!" if bad else " "
+        lines.append(f" {marker} {name:<30} {total:>6} entries  {bad:>4} failing")
+    return lines
+
+
+def crossings(entries) -> list[str]:
+    """Traces that appear in more than one file.
+
+    A request that failed in one service and was logged in another is exactly
+    what a single-file tool cannot show, so it is called out explicitly.
+    """
+    per_trace: dict[str, set[str]] = {}
+    failing: set[str] = set()
+    for entry in entries:
+        if not entry.trace_id or not entry.source:
+            continue
+        per_trace.setdefault(entry.trace_id, set()).add(entry.source)
+        if entry.is_failure:
+            failing.add(entry.trace_id)
+
+    spanning = {t: f for t, f in per_trace.items() if len(f) > 1}
+    if not spanning:
+        return []
+
+    lines = []
+    for trace_id, files in sorted(spanning.items(), key=lambda kv: -len(kv[1])):
+        mark = " (contains failures)" if trace_id in failing else ""
+        lines.append(f"  {trace_id}  spans {', '.join(sorted(files))}{mark}")
+    return lines
+
+
 def header(result: LoadResult, path: str, summary: analysis.Summary) -> list[str]:
     """One line a responder can read before deciding whether to keep reading."""
     parts = [
@@ -105,7 +159,7 @@ def patterns(entries, limit: int = 8) -> list[str]:
         where = ", ".join(group.services) or "unknown"
         flag = "  [!! SUSPICIOUS]" if group.example.suspicious else ""
         lines.append(f"  [{group.count}x] {group.signature[: WIDTH - 12]}")
-        lines.append(f"        {where}  {span}  first at [L{group.example.line_no}]{flag}")
+        lines.append(f"        {where}  {span}  first at [L{group.example.citation_id}]{flag}")
         if group.exceptions:
             lines.append(f"        {group.exceptions[0][: WIDTH - 10]}")
     return lines
@@ -144,7 +198,7 @@ def traces(entries, limit: int = 2) -> list[str]:
             service = (step.entry.service or "unknown")[:20]
             message = step.entry.message[: WIDTH - 46]
             lines.append(
-                f"   {gap} [L{step.entry.line_no}] {step.entry.level:<5} "
+                f"   {gap} [L{step.entry.citation_id}] {step.entry.level:<5} "
                 f"{service:<20} {message}{mark}"
             )
         lines.append("")
@@ -164,7 +218,7 @@ def anomalies(entries, bucket_seconds: int = 60) -> list[str]:
         )
         for entry in result.latency_outliers[:5]:
             lines.append(
-                f"    {entry.latency_ms:>8.0f}ms  [L{entry.line_no}] "
+                f"    {entry.latency_ms:>8.0f}ms  [L{entry.citation_id}] "
                 f"{entry.service} — {entry.message[: WIDTH - 34]}"
             )
     for note in result.notes:
@@ -202,6 +256,14 @@ def render(result: LoadResult, path: str, bucket_seconds: int = 60) -> str:
     summary = analysis.summarize(result.entries, result.skipped)
 
     lines = header(result, path, summary)
+
+    file_lines = sources(result.entries)
+    if file_lines:
+        lines += _section("files") + file_lines
+        crossing = crossings(result.entries)
+        if crossing:
+            lines += ["", "  Traces crossing file boundaries:"] + crossing
+
     lines += _section("levels") + levels(result)
     lines += _section("services") + services(summary)
     lines += _section("error patterns") + patterns(result.entries)
