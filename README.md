@@ -205,15 +205,49 @@ A tool that fabricates evidence is worse than no tool, so the default is the mod
 
 ---
 
+## Evaluation
+
+Claims about reliability need measurement, so the repository carries an eval harness rather than a demo.
+
+```bash
+python -m evals.run                     # tool correctness + verifier scores, no model needed
+python -m evals.run --live -m gemma4    # also run a model against every case
+python -m evals.run --live --repeat 3   # repeat runs to see variance
+python -m evals.run --ablate            # hostile log with the safety layer on vs off
+```
+
+Two layers, kept apart so a regression can be attributed:
+
+**Tool correctness** — 9 logs with ground truth written beside them: a cascading failure, a fault recurring across hosts, distinct status codes that must not merge, a healthy log, a hostile log, secrets, an error burst, mixed formats, and a file large enough to truncate. 38 deterministic checks on entry counts, failure counts, error rates, grouping, redaction and injection flags. **No model required**, so it runs in CI and a failure is a bug in this repository.
+
+**Answer quality** — needs a model, so it is opt-in and always reported with the model name. Scores whether the answer states what is true, avoids what is false, cites real lines, and refuses an injected instruction.
+
+### Verifier precision and recall
+
+The checker is itself measured, against 16 hand-labelled answers — 8 honest, 8 fabricated:
+
+```
+precision 1.00  recall 1.00  f1 1.00   (tp 8 fp 0 tn 8 fn 0)
+Known blind spots: 5/5 wrong answers pass unflagged. These are not counted above.
+  UNCAUGHT: causality inverted — the cited line exists but does not support the claim
+  UNCAUGHT: invented count attached to a real citation
+  UNCAUGHT: invented mechanism attributed to a real line
+  UNCAUGHT: claim contradicts the line it cites
+  UNCAUGHT: fabrication with no citation at all
+```
+
+**The blind spots are the honest part of that table.** A perfect score on a set the author wrote means the set is easy, not that the checker is complete. Those five answers are wrong, they pass, and they are listed so the headline numbers are read as describing the narrow problem they actually cover: citations that do not exist, and citations to hostile lines. Judging whether a real line supports the claim made about it needs entailment, and is not implemented.
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 265 tests
+pytest              # 290 tests
+python -m evals.run
 ruff check . && ruff format --check .
 ```
 
-CI runs lint, format check, and tests on Python 3.11, 3.12 and 3.13.
+CI runs lint, format check, tests and the offline evals on Python 3.11, 3.12 and 3.13.
 
 ```text
 loglens/
