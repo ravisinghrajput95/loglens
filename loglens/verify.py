@@ -1,95 +1,220 @@
-"""Checking that an answer only quotes what the tools actually returned.
+"""Checking an answer against the evidence the tools actually returned.
 
-The tools cannot fabricate: they compute from the file. The model can, and was
-observed doing exactly that — quoting eight log lines it had never retrieved,
-formatted as logback when the file was JSON. A system prompt cannot prevent
-this. Comparing the finished answer against the tool output can.
+The first version of this compared quoted passages against tool output as
+plain text. Two problems emerged from a design review, and both are structural
+rather than fixable by tuning:
 
-This runs after the agent is done and needs no cooperation from the model.
+1. It verified provenance, not truth. A passage that appeared in tool output
+   was marked supported — including a line an attacker had written into the
+   log. That made the check an amplifier for injected content rather than a
+   defence against it.
+2. It only saw text the model chose to put in quotes. Dropping the quotation
+   marks made any fabrication invisible, so the check policed a formatting
+   habit rather than honesty.
+
+This version works on citations instead. Tools render each log line with an id
+like `[L42]`; the model is asked to cite the ids a finding rests on. That
+converts verification into a referential-integrity problem with three separate
+questions, each answerable deterministically:
+
+  - Does every cited id exist in what the tools returned?  (fabricated source)
+  - Does every substantive claim carry a citation?          (uncited assertion)
+  - Do any cited lines come from flagged, hostile content?  (poisoned evidence)
+
+What it still cannot do is judge whether a cited line supports the claim made
+about it. That needs entailment, not string matching, and is stated as a limit
+rather than implied away.
 """
 
 import re
 from dataclasses import dataclass, field
 
-# Spans the model presents as verbatim: markdown code spans and double-quoted
-# text. Both patterns match a delimiter pair with no delimiter inside, so a
-# sentence containing two separate code spans yields two quotes rather than
-# one quote made of the prose between them.
-_CODE_SPAN = re.compile(r"`([^`\n]+)`")
-_DOUBLE_QUOTED = re.compile(r"\"([^\"\n]+)\"")
+# The citation form tools emit and the model is asked to reuse.
+CITATION = re.compile(r"\[L(\d+)\]")
 
-# Below this length a span carries no real claim — "ERROR", "db", "20%" — and
-# checking it produces noise rather than signal.
-MIN_QUOTE_LENGTH = 10
+# Sentence-ish units. Splitting on terminators and list markers keeps bullet
+# points, which carry most findings, as separate claims.
+_CLAIM_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+•]|\d+[.)]|\*\*?)\s*")
+
+# A claim short enough to be a heading or a fragment carries no assertion worth
+# checking. "**Summary**" and "Recommendations" should not be demanded to cite.
+MIN_CLAIM_LENGTH = 40
+
+# Claims that assert something about the log. Recommendations and questions do
+# not rest on evidence in the same way, so requiring citations from them would
+# generate noise that trains people to ignore the warning.
+_EVIDENTIAL = re.compile(
+    r"\b(?:error|errors|fail|failed|failure|failures|timeout|timed out|exception|"
+    r"crash|crashed|refused|unavailable|down|spike|latency|slow|restart|"
+    r"occurred|reported|shows?|indicates?|observed|detected|logged|"
+    r"service|entries|entry|rate|count)\b",
+    re.I,
+)
+_ADVISORY = re.compile(
+    r"^\s*(?:consider|recommend|you should|investigate|check|verify|review|"
+    r"ensure|implement|increase|reduce|monitor|add|configure|next step)",
+    re.I,
+)
 
 
-def normalize(text: str) -> str:
-    """Fold the differences that don't change what is being claimed."""
-    text = re.sub(r"\s+", " ", text)
-    return text.strip().strip(".,;:").casefold()
+@dataclass
+class Claim:
+    text: str
+    citations: tuple[int, ...]
 
-
-def extract_quotes(answer: str) -> list[str]:
-    """Pull the spans an answer presents as quoted evidence."""
-    seen: dict[str, str] = {}
-    for pattern in (_CODE_SPAN, _DOUBLE_QUOTED):
-        for raw in pattern.findall(answer):
-            candidate = raw.strip()
-            if len(candidate) < MIN_QUOTE_LENGTH:
-                continue
-            key = normalize(candidate)
-            if key and key not in seen:
-                seen[key] = candidate
-    return list(seen.values())
+    @property
+    def cited(self) -> bool:
+        return bool(self.citations)
 
 
 @dataclass
 class Report:
-    checked: list[str] = field(default_factory=list)
-    unsupported: list[str] = field(default_factory=list)
+    claims: list[Claim] = field(default_factory=list)
+    unknown_citations: list[int] = field(default_factory=list)
+    uncited: list[Claim] = field(default_factory=list)
+    poisoned: list[int] = field(default_factory=list)
+    available: int = 0
 
     @property
-    def supported(self) -> int:
-        return len(self.checked) - len(self.unsupported)
+    def cited_claims(self) -> list[Claim]:
+        return [c for c in self.claims if c.cited]
+
+    @property
+    def coverage(self) -> float:
+        """Share of evidential claims that carry a citation."""
+        if not self.claims:
+            return 1.0
+        return len(self.cited_claims) / len(self.claims)
 
     @property
     def clean(self) -> bool:
-        return not self.unsupported
+        return not (self.unknown_citations or self.poisoned)
 
 
-def verify(answer: str, sources: list[str], allow: list[str] | None = None) -> Report:
-    """Check every quoted span in `answer` against the text the tools returned.
+def available_ids(sources: list[str]) -> set[int]:
+    """Every line id the tools actually showed."""
+    ids: set[int] = set()
+    for source in sources:
+        ids.update(int(match) for match in CITATION.findall(source))
+    return ids
 
-    `allow` covers spans that are legitimately not log content — tool names the
-    model refers to by name, for instance.
+
+def suspicious_ids(sources: list[str]) -> set[int]:
+    """Line ids the parser flagged as probable injection attempts.
+
+    Read back out of the rendered tool output rather than passed alongside it,
+    so the check works on exactly the text the model was given.
     """
-    corpus = normalize(" ".join(sources))
-    permitted = {normalize(a) for a in (allow or [])}
+    flagged: set[int] = set()
+    for source in sources:
+        for line in source.splitlines():
+            if "SUSPICIOUS" in line:
+                flagged.update(int(match) for match in CITATION.findall(line))
+    return flagged
 
-    report = Report()
-    for quote in extract_quotes(answer):
-        report.checked.append(quote)
-        key = normalize(quote)
-        if key in permitted or key in corpus:
+
+def split_claims(answer: str) -> list[str]:
+    """Break an answer into units that can each be checked for a citation."""
+    units: list[str] = []
+    for raw in _CLAIM_SPLIT.split(answer):
+        text = _LIST_MARKER.sub("", raw).strip()
+        if len(text) < MIN_CLAIM_LENGTH:
             continue
-        report.unsupported.append(quote)
+        units.append(text)
+    return units
+
+
+def is_evidential(text: str) -> bool:
+    """Does this claim assert something the log should back up?"""
+    if _ADVISORY.match(text):
+        return False
+    return bool(_EVIDENTIAL.search(text))
+
+
+def verify(
+    answer: str,
+    sources: list[str],
+    suspicious_ids: set[int] | None = None,
+) -> Report:
+    """Check an answer's citations against the evidence the tools returned."""
+    report = Report()
+    if not answer or not sources:
+        return report
+
+    known = available_ids(sources)
+    report.available = len(known)
+    flagged = suspicious_ids or set()
+
+    # Citations are checked across the whole answer, not per claim. Claim
+    # splitting drops fragments too short to assert anything, and a fabricated
+    # id inside one of those would otherwise never be looked at.
+    seen: set[int] = set()
+    for match in CITATION.findall(answer):
+        line_id = int(match)
+        if line_id in seen:
+            continue
+        seen.add(line_id)
+        if line_id not in known:
+            report.unknown_citations.append(line_id)
+        if line_id in flagged:
+            report.poisoned.append(line_id)
+
+    # Coverage is a separate question, and only meaningful for claims that
+    # assert something about the log.
+    for text in split_claims(answer):
+        if not is_evidential(text):
+            continue
+        claim = Claim(text=text, citations=tuple(int(m) for m in CITATION.findall(text)))
+        report.claims.append(claim)
+        if not claim.cited:
+            report.uncited.append(claim)
+
     return report
 
 
-def format_report(report: Report) -> str:
-    """A warning to show the user, or empty when there is nothing to say."""
-    if report.clean:
+def format_report(report: Report, strict: bool = False) -> str:
+    """A warning for the user, or empty when there is nothing worth saying."""
+    lines: list[str] = []
+
+    if report.unknown_citations:
+        ids = ", ".join(f"L{i}" for i in sorted(report.unknown_citations))
+        many = len(report.unknown_citations) > 1
+        lines.append(
+            f"FABRICATED CITATION{'S' if many else ''}: the answer cites {ids}, "
+            f"which the tools never returned. "
+            f"{'Those claims rest' if many else 'That claim rests'} on nothing."
+        )
+
+    if report.poisoned:
+        ids = ", ".join(f"L{i}" for i in sorted(report.poisoned))
+        many = len(report.poisoned) > 1
+        lines.append(
+            f"POISONED EVIDENCE: {ids} {'were' if many else 'was'} flagged as a "
+            "probable prompt-injection attempt. A claim resting on "
+            f"{'them' if many else 'it'} repeats what an attacker wrote, not what "
+            "the system did."
+        )
+
+    if report.claims:
+        pct = report.coverage * 100
+        if report.uncited and (strict or pct < 100):
+            lines.append(
+                f"Citation coverage {pct:.0f}% "
+                f"({len(report.cited_claims)} of {len(report.claims)} factual "
+                "claims cite a line). Uncited:"
+            )
+            for claim in report.uncited[:5]:
+                text = claim.text if len(claim.text) <= 110 else claim.text[:107] + "..."
+                lines.append(f"  - {text}")
+            if len(report.uncited) > 5:
+                lines.append(f"  ... and {len(report.uncited) - 5} more")
+
+    if not lines:
         return ""
 
-    lines = [
-        f"Warning: {len(report.unsupported)} of {len(report.checked)} quoted "
-        "passages do not appear in the tool output. The model may have "
-        "invented them:",
-    ]
-    for quote in report.unsupported[:10]:
-        shown = quote if len(quote) <= 100 else quote[:97] + "..."
-        lines.append(f"  - {shown}")
-    if len(report.unsupported) > 10:
-        lines.append(f"  ... and {len(report.unsupported) - 10} more")
-    lines.append("Treat those as unverified. A stronger model usually fixes this.")
+    lines.append(
+        "Verification checks that cited lines exist and are not hostile. It "
+        "cannot tell whether a line supports the claim made about it."
+    )
     return "\n".join(lines)

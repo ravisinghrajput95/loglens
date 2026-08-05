@@ -5,8 +5,7 @@ import sys
 
 from . import __version__, tools
 from .agent import DEFAULT_BASE_URL, DEFAULT_MODEL, build_agent
-from .tools import TOOLS
-from .verify import format_report, verify
+from .verify import format_report, suspicious_ids, verify
 
 BANNER = """LogLens {version} — log analysis agent
 model: {model} via {base_url}
@@ -84,11 +83,11 @@ def _report(exc: Exception, model: str, base_url: str) -> None:
         print(hint, file=sys.stderr)
 
 
-def _check(answer: str, tool_outputs: list[str], tool_names: list[str]) -> None:
-    """Warn about quoted passages the tools never returned."""
+def _check(answer: str, tool_outputs: list[str]) -> None:
+    """Warn when an answer cites lines that do not exist or are hostile."""
     if not answer or not tool_outputs:
         return
-    report = verify(answer, tool_outputs, allow=tool_names)
+    report = verify(answer, tool_outputs, suspicious_ids(tool_outputs))
     warning = format_report(report)
     if warning:
         print("\n" + warning, file=sys.stderr, flush=True)
@@ -107,7 +106,6 @@ def ask(agent, history: list, question: str, stream: bool, check: bool = True) -
     """
     messages = history + [("user", question)]
     tool_outputs: list[str] = []
-    tool_names = [t.name for t in TOOLS]
 
     if not stream:
         result = agent.invoke({"messages": messages})
@@ -117,7 +115,7 @@ def ask(agent, history: list, question: str, stream: bool, check: bool = True) -
         answer = result["messages"][-1].content
         print(answer)
         if check:
-            _check(answer, tool_outputs, tool_names)
+            _check(answer, tool_outputs)
         return messages + [("assistant", answer)]
 
     # Tool calls are announced on stderr as they happen, so a multi-step
@@ -145,7 +143,7 @@ def ask(agent, history: list, question: str, stream: bool, check: bool = True) -
 
     answer = "".join(parts)
     if check:
-        _check(answer, tool_outputs, tool_names)
+        _check(answer, tool_outputs)
 
     return messages + [("assistant", answer)]
 

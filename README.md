@@ -155,25 +155,37 @@ The system prompt forbids inventing log entries, but a prompt alone doesn't achi
 
 - Every claim traces to tool output computed in Python, not to the model reading raw text.
 - Tools report their own limits. Too few time buckets to judge a spike, too few `latency_ms` samples for a baseline, a file truncated by the cap — each is stated rather than papered over.
-- Failures come back as text the model can relay. A missing file or a bad regex returns a message instead of raising, so a mistake produces a useful reply rather than a crash.
+- Failures come back as text the model can relay. A missing file or a bad regex returns a message instead of raising.
 - The parser refuses to guess. A prose sentence containing the word "error" is not counted as an ERROR entry.
-- **Every answer is checked against the tool output before you see it.** Each quoted passage is compared with what the tools actually returned; anything that does not appear is reported as possibly invented. This runs automatically and needs no cooperation from the model, which is the point — a model that fabricates will not admit to it.
+
+### Citations, checked
+
+Tools render each line with an id — `[L12] 20:17:00 ERROR order-service …` — and the model is asked to cite the ids a finding rests on. After every answer, three questions are checked deterministically:
+
+| Check | Catches |
+| --- | --- |
+| Does every cited id exist in what the tools returned? | Invented evidence |
+| Does every factual claim carry a citation? | Assertions resting on nothing |
+| Do any cited ids come from injection-flagged lines? | Repeating what an attacker wrote |
+
+A real run against the weaker model:
 
 ```
 $ loglens -m llama3.2 "Analyze ./app.log. What broke and why?"
   · summarize_logs
 
-Warning: 8 of 8 quoted passages do not appear in the tool output.
-The model may have invented them:
-  - 2026-07-30 20:15:31 INFO [kubernetes-controller] [main] Starting controller
-  - 2026-07-30 20:16:01 ERROR [kubernetes-controller] [main] Failed to create pod
+FABRICATED CITATIONS: the answer cites L1, L2, L3, L4, L5, L6, which the
+tools never returned. Those claims rest on nothing.
+Citation coverage 50% (6 of 12 factual claims cite a line). Uncited:
+  - The application is experiencing a high error rate, with 20% of entries being errors.
   ...
-Treat those as unverified. A stronger model usually fixes this.
 ```
 
-That is a real run. `llama3.2` called one tool that returns counts and no log lines, then invented eight entries in a format this JSON file never uses. The same question to `gemma4` produces no warning at all — its quotes come from what it retrieved. Disable the check with `--no-verify`.
+`summarize_logs` returns counts and no line ids, so every one of those six citations was invented.
 
-The check is deliberately narrow: it verifies quoted passages, not paraphrase or arithmetic. A model can still summarize wrongly without quoting anything. What it does catch is the failure that matters most during an incident — invented evidence that reads exactly like a real log line.
+**This replaced an earlier design that was worse than useless.** The first version compared quoted passages against tool output. It verified *provenance, not truth*: a passage that appeared in the log was marked supported — including a line an attacker had written. Anyone who could write one log line could get their claim certified. It also saw nothing unless the model used quotation marks, so dropping them hid any fabrication.
+
+**What it still cannot do** is judge whether a cited line actually supports the claim made about it. That needs entailment, not string matching. The warning says so explicitly rather than implying a guarantee it doesn't provide. Recommendations and advice are exempt from citation requirements — demanding evidence for "consider raising the timeout" produces noise, and a warning people learn to ignore is worse than no warning.
 
 **The model is still the weak link, and model choice matters more than you would expect.** The tools are deterministic; the narration around them is not.
 
@@ -197,7 +209,7 @@ A tool that fabricates evidence is worse than no tool, so the default is the mod
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 181 tests
+pytest              # 265 tests
 ruff check . && ruff format --check .
 ```
 
@@ -210,7 +222,9 @@ loglens/
 ├── analysis.py   pure functions — the actual analysis
 ├── tools.py      LangChain tools wrapping those functions
 ├── agent.py      model wiring and system prompt
-├── verify.py     checks answers only quote what the tools returned
+├── redact.py     strips credentials before anything is retained
+├── safety.py     injection detection and fencing of untrusted content
+├── verify.py     citation integrity, coverage, poisoned-evidence checks
 └── cli.py        argument parsing, interactive session, streaming
 ```
 
