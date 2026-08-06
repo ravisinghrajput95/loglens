@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from .dataset import BY_NAME, CASES
+from .formats import run as run_formats
 from .score import AnswerResult, score_answer, score_tools, write_log
 from .verifier_bench import BLIND_SPOTS, run_blind_spots
 from .verifier_bench import run as run_verifier_bench
@@ -106,6 +107,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"       - {check.name}: {check.detail}")
     print(f"  => {passed}/{total} checks passed\n")
 
+    print("Format coverage — one line per real-world corpus")
+    format_results = run_formats()
+    bad = [(name, detail) for name, ok, detail in format_results if not ok]
+    for name, detail in bad:
+        print(f"  FAIL {name}: {detail}")
+    print(f"  => {len(format_results) - len(bad)}/{len(format_results)} formats recognised\n")
+
     print("Verifier precision and recall — labelled honest vs fabricated answers")
     bench = run_verifier_bench()
     print(
@@ -186,9 +194,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
 
+    failed_formats = bool(bad)
     failed_offline = passed != total
     failed_verifier = bench.false_negative > 0 or bench.false_positive > 0
-    return 1 if (failed_offline or failed_verifier) else 0
+    return 1 if (failed_offline or failed_verifier or failed_formats) else 0
 
 
 if __name__ == "__main__":

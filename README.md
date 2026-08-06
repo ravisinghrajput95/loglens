@@ -174,7 +174,8 @@ loglens --base-url http://gpu-box:11434 "Summarize ./app.log"
 | Streaming | `--no-stream` to disable | — | on |
 | Answer verification | `--no-verify` to disable | — | on |
 | Secret redaction | `--no-redact` to disable | `LOGLENS_REDACT=0` | on |
-| Time window | `since` / `until` on searches | — | whole file |
+| Time window | `--since` / `--until` | — | whole file |
+| Severity inference | `--infer-severity` to enable | — | off |
 
 Tool calls print to stderr and the answer to stdout, so `loglens "..." > report.md` captures the report without the progress noise.
 
@@ -194,19 +195,51 @@ docker run --rm -it \
 
 ## Log formats
 
-Detected per line, so a file containing several formats is fine:
+Detected per line, so a file containing several formats is fine. Validated against 14 real corpora — 12 from [Loghub](https://github.com/logpai/loghub) plus this machine's installer and Ollama logs, 89,262 lines in total:
 
-| Format | Example |
-| --- | --- |
-| JSON lines | `{"timestamp":"...","level":"ERROR","service":"api","message":"..."}` |
-| logback / log4j / python | `2026-07-30 20:15:31,123 ERROR [order-service] com.foo.Bar - message` |
-| nginx error | `2026/07/30 20:15:31 [error] 1234#0: *1 upstream timed out` |
-| syslog | `Jul 30 20:15:31 web-01 nginx[1234]: message` |
-| bracketed | `[2026-07-30T20:15:31Z] [ERROR] [api] message` |
+| Corpus | Parsed | Format detected | Has levels | Has timestamps |
+| --- | --- | --- | --- | --- |
+| Apache | 100% | bracketed | ✅ | ✅ |
+| HDFS | 100% | hdfs | ✅ | ✅ |
+| Hadoop | 100% | logback | ✅ | ✅ |
+| Spark | 100% | spark | ✅ | ✅ |
+| OpenStack | 100% | openstack | ✅ | ✅ |
+| Zookeeper | 100% | loose | ✅ | ✅ |
+| OpenSSH | 100% | syslog | — | ✅ |
+| Linux | 100% | syslog | — | ✅ |
+| Thunderbird | 100% | bgl | — | ✅ |
+| Proxifier | 100% | proxifier | — | ✅ |
+| Mac | 96% | syslog | — | ✅ |
+| HealthApp | 71% | pipe | — | ✅ |
+| macOS install.log | 61% | syslog | partial | ✅ |
+| Ollama server | 18% | logfmt | ✅ | ✅ |
 
-JSON keys are matched flexibly — `message`/`msg`, `trace_id`/`traceId`, `latency_ms`/`duration_ms` — and any key it doesn't model is kept and searchable.
+**Before this validation, six of those corpora parsed at 0%.** The parser had only ever been tested against logs written for it. Ollama's 18% is honest rather than broken — most of that file is llama.cpp's free-form C++ diagnostics, which carry neither a timestamp nor a level, and guessing at them would manufacture entries that do not exist.
 
-Multi-line stack traces fold into the entry they belong to, including the unindented header line that names the real exception. Gzipped logs (`.log.gz`) are read directly.
+Recognised formats: JSON lines, logfmt (Go ecosystem — Docker, Grafana, Loki), logback/log4j, syslog, Spark/JVM, HDFS, OpenStack, nginx error, Gin access logs, Apache, BGL/Thunderbird, Proxifier, pipe-delimited, macOS, and a loose fallback.
+
+JSON keys are matched flexibly — `message`/`msg`, `trace_id`/`traceId`, `latency_ms`/`duration_ms` — and any key it doesn't model is kept and searchable. Multi-line stack traces fold into the entry they belong to, including the unindented header line that names the real exception. Gzipped logs are read directly.
+
+### When a format carries no severity
+
+Syslog, Proxifier and similar formats have no level field. Asked to summarise 2,000 lines of SSH authentication failures, an earlier version reported **"0.0% errors · 0/1 services failing"** — a confident wrong answer about a log full of failures.
+
+It now says `no severity field` and refuses to compute a rate it cannot support. `--infer-severity` classifies by message wording instead, and every inferred level is marked `~` and disclosed:
+
+```
+$ loglens report auth.log --infer-severity
+2000 entries · 4h08m · 69.0% errors · 1/1 services failing
+
+ERROR PATTERNS
+  [368x] Failed password for root from <IP> port <N> ssh2
+        sshd  07:13:43–11:04:43  first at [L29]
+  [368x] pam_unix(sshd:auth): authentication failure; logname= uid=<N>
+        sshd  07:27:50–11:04:43  first at [L34]
+
+CAVEATS
+  Levels marked '~' were inferred from message wording, not read from the
+  log. Treat them as a starting point, not as fact.
+```
 
 **Scale.** Files are streamed and retained entries are capped, so peak memory tracks entries kept rather than file size: a 42 MB / 400k-line file loads at 65 MB peak in 30s, and a file ten times larger loads at the same peak.
 
@@ -288,7 +321,7 @@ A tool that fabricates evidence is worse than no tool, so the default is the mod
 Claims about reliability need measurement, so the repository carries an eval harness rather than a demo.
 
 ```bash
-python -m evals.run                     # tool correctness + verifier scores, no model needed
+python -m evals.run                     # tool correctness, format coverage, verifier scores
 python -m evals.run --live -m gemma4    # also run a model against every case
 python -m evals.run --live --repeat 3   # repeat runs to see variance
 python -m evals.run --ablate            # hostile log with the safety layer on vs off
@@ -320,7 +353,7 @@ Known blind spots: 5/5 wrong answers pass unflagged. These are not counted above
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 335 tests
+pytest              # 392 tests
 python -m evals.run
 ruff check . && ruff format --check .
 ```

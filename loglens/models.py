@@ -66,6 +66,9 @@ class LogEntry:
     # Injection patterns found in this line's text, if any. A non-empty value
     # means the line tried to address the model rather than describe an event.
     injection: tuple[str, ...] = ()
+    # True when the level was inferred from message wording rather than read
+    # from a field. Always disclosed, never silently mixed with real levels.
+    level_inferred: bool = False
     # Which file this came from, when several were merged.
     source: str = ""
     # Citation id after a merge. Line numbers repeat across files, so merged
@@ -84,7 +87,8 @@ class LogEntry:
         """Compact single-line rendering used in tool output."""
         stamp = self.timestamp.strftime("%H:%M:%S") if self.timestamp else "--:--:--"
         where = self.service or "unknown"
-        text = f"{stamp} {self.level:<5} {where:<22} {self.message}"
+        marker = "~" if self.level_inferred else " "
+        text = f"{stamp} {self.level:<5}{marker}{where:<22} {self.message}"
         if self.exception:
             text += f"  [{self.exception}]"
         if self.detail:

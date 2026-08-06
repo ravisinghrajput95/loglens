@@ -94,11 +94,13 @@ def crossings(entries) -> list[str]:
 
 def header(result: LoadResult, path: str, summary: analysis.Summary) -> list[str]:
     """One line a responder can read before deciding whether to keep reading."""
-    parts = [
-        f"{result.total_entries} entries",
-        _duration(summary.duration),
-        f"{result.error_rate:.1f}% errors",
-    ]
+    parts = [f"{result.total_entries} entries", _duration(summary.duration)]
+    if result.has_severity:
+        parts.append(f"{result.error_rate:.1f}% errors")
+    else:
+        # Printing "0.0% errors" for a format with no severity field is a
+        # confident wrong answer about a log that may be full of failures.
+        parts.append("no severity field")
     services = len(summary.by_service)
     failing = sum(
         1
@@ -230,6 +232,18 @@ def anomalies(entries, bucket_seconds: int = 60) -> list[str]:
 def caveats(result: LoadResult) -> list[str]:
     """What the numbers above do not cover. Never omitted when it applies."""
     lines = []
+    if not result.has_severity:
+        lines.append(
+            f"  {result.unknown_share * 100:.0f}% of entries carry no level. This "
+            "format has no severity field, so an error rate cannot be computed "
+            "from it. Re-run with --infer-severity to classify by message wording "
+            "instead — those levels are guesses and are marked with '~'."
+        )
+    if any(e.level_inferred for e in result.entries):
+        lines.append(
+            "  Levels marked '~' were inferred from message wording, not read "
+            "from the log. Treat them as a starting point, not as fact."
+        )
     if result.truncated:
         lines.append(
             f"  Counts cover all {result.total_entries} entries; individual lines "

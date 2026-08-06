@@ -55,6 +55,12 @@ def build_report_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    parser.add_argument(
+        "--infer-severity",
+        action="store_true",
+        help="For formats with no level field (syslog and similar), classify "
+        "entries by message wording. Inferred levels are marked '~'.",
+    )
     parser.add_argument("--no-redact", action="store_true")
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--no-stream", action="store_true")
@@ -231,7 +237,11 @@ def report_command(argv: list[str]) -> int:
 
     label = args.file[0] if len(args.file) == 1 else f"{len(args.file)} files"
     try:
-        result = load_many(args.file, redact_secrets=not args.no_redact)
+        result = load_many(
+            args.file,
+            redact_secrets=not args.no_redact,
+            infer_severity=args.infer_severity,
+        )
     except FileNotFoundError as exc:
         print(f"No log file at '{exc.filename or args.file[0]}'.", file=sys.stderr)
         return 1

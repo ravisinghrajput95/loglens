@@ -62,11 +62,26 @@ _TIMESTAMP_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y/%m/%d %H:%M:%S",
     "%d/%b/%Y:%H:%M:%S %z",  # apache/nginx access
+    "%y%m%d %H%M%S",  # HDFS: 081109 203615
+    "%y/%m/%d %H:%M:%S",  # Spark, Hadoop: 17/06/09 20:10:40
+    "%Y/%m/%d - %H:%M:%S",  # Gin access log
+    "%a %b %d %H:%M:%S %Y",  # Apache error log: Sun Dec 04 04:47:44 2005
+    "%a %b %d %H:%M:%S.%f %Y",
+    "%Y%m%d-%H:%M:%S:%f",  # HealthApp: 20171223-22:15:29:606
+    "%Y-%m-%d %H:%M:%S.%f %z",
+    "%Y-%m-%d %H:%M:%S%z",  # macOS install.log: ...41-07
 )
 
 # Syslog omits the year. Parsing it yearless is deprecated from Python 3.15,
 # so the current year is prepended before parsing rather than patched in after.
-_YEARLESS_FORMATS = (("%b %d %H:%M:%S", "%Y %b %d %H:%M:%S"),)
+_YEARLESS_FORMATS = (
+    ("%b %d %H:%M:%S", "%Y %b %d %H:%M:%S"),
+    ("%m.%d %H:%M:%S", "%Y %m.%d %H:%M:%S"),  # Proxifier: 10.30 16:49:06
+)
+
+# A two-digit UTC offset like "-07" is not something strptime accepts, but
+# macOS writes it. Widen it to "-0700" before parsing.
+_SHORT_OFFSET = re.compile(r"([+-]\d{2})$")
 
 
 def _as_aware(value: datetime) -> datetime:
@@ -105,6 +120,14 @@ def parse_timestamp(value: Any) -> datetime | None:
         return _as_aware(datetime.fromisoformat(text.replace("Z", "+00:00")))
     except ValueError:
         pass
+
+    widened = _SHORT_OFFSET.sub(r"\g<1>00", text)
+    if widened != text:
+        try:
+            return _as_aware(datetime.fromisoformat(widened))
+        except ValueError:
+            pass
+        text = widened
 
     for fmt in _TIMESTAMP_FORMATS:
         try:
@@ -165,7 +188,8 @@ _TEXT_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
         re.compile(
             r"^(?P<timestamp>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+"
             r"(?P<host>\S+)\s+"
-            r"(?P<service>[\w./-]+)(?:\[(?P<pid>\d+)\])?:\s*"
+            r"(?P<service>[\w./()-]+(?:\s+[\d.]+)?)"
+            r"(?:\[(?P<pid>\d+)\])?(?:\s*\([^)]*\))?:\s*"
             r"(?P<message>.*)$"
         ),
     ),
@@ -179,6 +203,93 @@ _TEXT_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
             r"(?:\[(?P<service>[^\]]+)\]\s*)?"
             r"(?P<message>.*)$",
             re.IGNORECASE,
+        ),
+    ),
+    (
+        # Spark, Hadoop, and most JVM tools:
+        #   17/06/09 20:10:40 INFO executor.CoarseGrained: message
+        "spark",
+        re.compile(
+            r"^(?P<timestamp>\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})\s+"
+            rf"(?P<level>{_LEVEL_WORDS})\s+"
+            r"(?P<service>[\w.$]+):\s*(?P<message>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # HDFS:
+        #   081109 203615 148 INFO dfs.DataNode$PacketResponder: message
+        "hdfs",
+        re.compile(
+            r"^(?P<timestamp>\d{6} \d{6})\s+(?P<pid>\d+)\s+"
+            rf"(?P<level>{_LEVEL_WORDS})\s+"
+            r"(?P<service>[\w.$]+):\s*(?P<message>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # OpenStack, which prefixes each line with its source file:
+        #   nova-api.log.1.2017-05-16 2017-05-16 00:00:00.008 25746 INFO nova.x [req-..] message
+        "openstack",
+        re.compile(
+            r"^\S+\.log\S*\s+"
+            r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\s+"
+            r"(?P<pid>\d+)\s+"
+            rf"(?P<level>{_LEVEL_WORDS})\s+"
+            r"(?P<service>[\w.-]+)\s*(?P<message>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # macOS install.log and similar:
+        #   2026-06-03 10:52:41-07 localhost Installer Progress[57]: message
+        "macos",
+        re.compile(
+            r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[+-]\d{2,4})?)\s+"
+            r"(?P<host>\S+)\s+"
+            r"(?P<service>[\w .()/-]+?)\[(?P<pid>\d+)\]"
+            r"(?:\s*\([^)]*\))?:\s*(?P<message>.*)$"
+        ),
+    ),
+    (
+        # Thunderbird / BGL supercomputer logs:
+        #   - 1131566461 2005.11.09 dn228 Nov 9 12:01:01 dn228/dn228 crond[2915]: message
+        "bgl",
+        re.compile(
+            r"^(?P<flag>-|[A-Z]\S*)\s+\d{9,}\s+\d{4}\.\d{2}\.\d{2}\s+\S+\s+"
+            r"(?P<timestamp>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+"
+            r"(?P<host>\S+)\s+"
+            r"(?P<service>[\w./()-]+)(?:\[(?P<pid>\d+)\])?:\s*(?P<message>.*)$"
+        ),
+    ),
+    (
+        # Gin (Go HTTP framework) access log:
+        #   [GIN] 2026/07/30 - 23:07:31 | 200 | 209.291µs | 127.0.0.1 | GET "/api/version"
+        "gin",
+        re.compile(
+            r"^\[GIN\]\s+(?P<timestamp>\d{4}/\d{2}/\d{2} - \d{2}:\d{2}:\d{2})\s*\|"
+            r"\s*(?P<status>\d{3})\s*\|"
+            r"\s*(?P<took>\S+)\s*\|"
+            r"\s*(?P<client>\S+)\s*\|"
+            r"\s*(?P<message>.*)$"
+        ),
+    ),
+    (
+        # Proxifier:
+        #   [10.30 16:49:06] chrome.exe - proxy.example:5070 open through proxy
+        "proxifier",
+        re.compile(
+            r"^\[(?P<timestamp>\d{2}\.\d{2} \d{2}:\d{2}:\d{2})\]\s+"
+            r"(?P<service>\S+(?:\s+\*\d+)?)\s+-\s+(?P<message>.*)$"
+        ),
+    ),
+    (
+        # Pipe-delimited, as HealthApp and many mobile SDKs emit:
+        #   20171223-22:15:29:606|Step_LSC|30002312|onStandStepChanged 3579
+        "pipe",
+        re.compile(
+            r"^(?P<timestamp>\d{8}-\d{2}:\d{2}:\d{2}:\d{1,3})\|"
+            r"(?P<service>[^|]*)\|(?P<pid>[^|]*)\|(?P<message>.*)$"
         ),
     ),
     (
@@ -212,6 +323,70 @@ def _first(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload and payload[key] is not None:
             return payload[key]
     return None
+
+
+# logfmt: space-separated key=value, values optionally quoted. Emitted by most
+# of the Go ecosystem — Docker, Grafana, Loki, Ollama — so it is worth parsing
+# properly rather than leaving to the loose fallback.
+_LOGFMT_PAIR = re.compile(r'([\w.-]+)=("(?:[^"\\]|\\.)*"|\S*)')
+_LOGFMT_LIKELY = re.compile(r"(?:^|\s)(?:time|ts|level|lvl|msg|message)=")
+
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return value
+
+
+def parse_logfmt_line(line: str, line_no: int = 0) -> LogEntry | None:
+    """Parse a logfmt line: time=... level=INFO msg="..." key=value."""
+    if not _LOGFMT_LIKELY.search(line):
+        return None
+
+    pairs = {k: _unquote(v) for k, v in _LOGFMT_PAIR.findall(line)}
+    if not pairs or not ({"msg", "message", "level", "lvl"} & pairs.keys()):
+        return None
+
+    latency = pairs.get("duration_ms") or pairs.get("latency_ms")
+    try:
+        latency_value = float(latency) if latency else None
+    except ValueError:
+        latency_value = None
+
+    known = {
+        "time",
+        "ts",
+        "timestamp",
+        "level",
+        "lvl",
+        "msg",
+        "message",
+        "source",
+        "service",
+        "component",
+        "logger",
+        "host",
+        "trace_id",
+        "err",
+        "error",
+        "duration_ms",
+        "latency_ms",
+    }
+    return LogEntry(
+        line_no=line_no,
+        raw=line,
+        level=normalize_level(pairs.get("level") or pairs.get("lvl")),
+        timestamp=parse_timestamp(
+            pairs.get("time") or pairs.get("ts") or pairs.get("timestamp")
+        ),
+        service=pairs.get("service") or pairs.get("component") or pairs.get("source"),
+        host=pairs.get("host"),
+        message=pairs.get("msg") or pairs.get("message") or "",
+        trace_id=pairs.get("trace_id"),
+        exception=pairs.get("err") or pairs.get("error"),
+        latency_ms=latency_value,
+        extra={k: v for k, v in pairs.items() if k not in known},
+    )
 
 
 def parse_json_line(line: str, line_no: int = 0) -> LogEntry | None:
@@ -263,6 +438,16 @@ def parse_text_line(line: str, line_no: int = 0) -> tuple[LogEntry | None, str]:
         if service is None and name == "nginx":
             service = "nginx"
 
+        if name == "gin":
+            service = service or "gin"
+            # An access log states its outcome as a status code. Reading 500 as
+            # an error is interpreting the field that exists, not inventing a
+            # severity the line never carried.
+            status = groups.get("status")
+            if status and status.isdigit():
+                code = int(status)
+                level = "ERROR" if code >= 500 else "WARN" if code >= 400 else "INFO"
+
         return (
             LogEntry(
                 line_no=line_no,
@@ -276,6 +461,41 @@ def parse_text_line(line: str, line_no: int = 0) -> tuple[LogEntry | None, str]:
             name,
         )
     return None, ""
+
+
+# Wording that states an outcome. Used only when a log format carries no
+# severity field at all, and only when explicitly asked for: syslog, Proxifier
+# and similar formats otherwise report a 0% error rate on a file full of
+# failures, which is worse than saying nothing.
+_SEVERITY_HINTS: tuple[tuple[str, re.Pattern], ...] = (
+    (
+        "ERROR",
+        re.compile(
+            r"\b(?:fail(?:ed|ure|s)?|error|denied|refused|reject(?:ed)?|timed?\s*out|"
+            r"timeout|unable to|cannot|can't|couldn't|exception|panic|fatal|"
+            r"corrupt(?:ed)?|unauthori[sz]ed|forbidden|invalid|abort(?:ed)?|"
+            r"crash(?:ed)?|no space|out of memory|segfault|not permitted)\b",
+            re.I,
+        ),
+    ),
+    (
+        "WARN",
+        re.compile(
+            r"\b(?:warn(?:ing)?|deprecat(?:ed|ion)|retry(?:ing)?|retries|slow|"
+            r"throttl(?:ed|ing)|degraded|unstable|exceed(?:ed|s)?|"
+            r"nearly full|high usage|disconnect(?:ed)?)\b",
+            re.I,
+        ),
+    ),
+)
+
+
+def infer_level(text: str) -> str:
+    """Guess a severity from wording. ERROR wins over WARN when both appear."""
+    for level, pattern in _SEVERITY_HINTS:
+        if pattern.search(text):
+            return level
+    return "INFO"
 
 
 def sanitize(
@@ -320,6 +540,8 @@ def parse_line(line: str, line_no: int = 0, redact_secrets: bool = True) -> LogE
         return None
     entry = parse_json_line(stripped, line_no)
     if entry is None:
+        entry = parse_logfmt_line(stripped, line_no)
+    if entry is None:
         entry, _ = parse_text_line(stripped, line_no)
     if entry is None:
         return None
@@ -356,6 +578,18 @@ class LoadResult:
     total_by_level: Counter = field(default_factory=Counter)
     redactions: Counter = field(default_factory=Counter)
     suspicious: int = 0
+
+    @property
+    def unknown_share(self) -> float:
+        """Fraction of entries whose format carried no severity field."""
+        if not self.total_entries:
+            return 0.0
+        return self.total_by_level.get("UNKNOWN", 0) / self.total_entries
+
+    @property
+    def has_severity(self) -> bool:
+        """Is an error rate meaningful for this file at all?"""
+        return self.unknown_share < 0.5
 
     @property
     def total_failures(self) -> int:
@@ -409,6 +643,8 @@ def iter_entries(path: str | Path, redact_secrets: bool = True) -> Iterator[LogE
             stripped = line.strip()
             entry = parse_json_line(stripped, line_no)
             if entry is None:
+                entry = parse_logfmt_line(stripped, line_no)
+            if entry is None:
                 entry, _ = parse_text_line(stripped, line_no)
 
             if entry is None:
@@ -428,6 +664,7 @@ def load_entries(
     path: str | Path,
     max_entries: int = DEFAULT_MAX_ENTRIES,
     redact_secrets: bool = True,
+    infer_severity: bool = False,
 ) -> LoadResult:
     """Read a log file, keeping counts for all of it and detail for the tail.
 
@@ -446,6 +683,9 @@ def load_entries(
 
     def complete(entry: LogEntry) -> None:
         sanitize(entry, redact_secrets, result.redactions)
+        if infer_severity and entry.level == "UNKNOWN":
+            entry.level = infer_level(entry.message or entry.raw)
+            entry.level_inferred = True
         result.total_entries += 1
         result.total_by_level[entry.level] += 1
         if entry.suspicious:
@@ -462,6 +702,9 @@ def load_entries(
             stripped = line.strip()
             entry = parse_json_line(stripped, line_no)
             fmt = "json" if entry is not None else ""
+            if entry is None:
+                entry = parse_logfmt_line(stripped, line_no)
+                fmt = "logfmt" if entry is not None else ""
             if entry is None:
                 entry, fmt = parse_text_line(stripped, line_no)
 
@@ -548,6 +791,7 @@ def load_many(
     paths: list[str | Path],
     max_entries: int = DEFAULT_MAX_ENTRIES,
     redact_secrets: bool = True,
+    infer_severity: bool = False,
 ) -> LoadResult:
     """Read several logs as one timeline.
 
@@ -560,14 +804,14 @@ def load_many(
     citation. Each entry keeps its file and original line for display.
     """
     if len(paths) == 1:
-        return load_entries(paths[0], max_entries, redact_secrets)
+        return load_entries(paths[0], max_entries, redact_secrets, infer_severity)
 
     merged: list[LogEntry] = []
     combined = LoadResult(entries=[])
 
     for path in paths:
         target = Path(path)
-        result = load_entries(target, max_entries, redact_secrets)
+        result = load_entries(target, max_entries, redact_secrets, infer_severity)
         for entry in result.entries:
             entry.source = target.name
         merged.extend(result.entries)
