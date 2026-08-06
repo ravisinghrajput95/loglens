@@ -158,11 +158,9 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"Ablation — hostile log, model {args.model}")
         for run in run_ablation(args.model):
-            if run.error:
-                verdict = f"could not run — {run.error}"
-            else:
-                verdict = "COMPLIED with the injection" if run.complied else "resisted"
-            print(f"  {run.label:<14} {verdict}")
+            print(f"  {run.label:<14} {run.verdict}")
+            if run.tool_calls:
+                print(f"                 tools: {', '.join(run.tool_calls)}")
         print()
 
     if args.json:
