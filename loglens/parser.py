@@ -372,7 +372,18 @@ _EXCEPTION_HEADER = re.compile(
 # Azure writes LogMessage and TimeGenerated, Google nests the payload under
 # jsonPayload or textPayload and the container name under resource.labels.
 # Matching case-sensitively on top-level keys finds none of it.
-_NESTED_PAYLOADS = ("jsonPayload", "structPayload", "protoPayload", "fields", "data")
+# Azure's LogMessage is a dynamic column: when the container writes JSON it
+# arrives as an object rather than a string, and rendering that with str()
+# produces a Python dict repr with the fields still buried in it.
+_NESTED_PAYLOADS = (
+    "jsonPayload",
+    "structPayload",
+    "protoPayload",
+    "fields",
+    "data",
+    "LogMessage",
+    "log",
+)
 
 
 def _flatten(payload: dict[str, Any]) -> dict[str, Any]:
@@ -399,6 +410,20 @@ def _flatten(payload: dict[str, Any]) -> dict[str, Any]:
                 flat.setdefault(k, v)
 
     return flat
+
+
+def _as_message(value: Any) -> str:
+    """Render a message field as text.
+
+    A dynamic column can hand back an object. Rendering that with str() gives
+    a Python repr — single quotes, True instead of true — which is neither the
+    original line nor valid JSON. Serialising it keeps it searchable.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"), default=str)
+    return str(value).rstrip("\n")
 
 
 def _audit_event(payload: dict[str, Any]) -> dict[str, str] | None:
@@ -528,7 +553,7 @@ def parse_json_line(line: str, line_no: int = 0) -> LogEntry | None:
     level_value = _first(payload, "level", "severity", "loglevel")
     if audit:
         level_value = audit["level"]
-    elif level_value is None and _first(payload, "stream") == "stderr":
+    elif level_value is None and _first(payload, "stream", "logsource") == "stderr":
         # The container runtime recorded which stream this came from. Reading
         # stderr as a failure uses a field that exists rather than guessing
         # from wording.
@@ -562,9 +587,9 @@ def parse_json_line(line: str, line_no: int = 0) -> LogEntry | None:
         message=(
             audit["message"]
             if audit
-            else str(
-                _first(payload, "message", "msg", "logmessage", "textpayload", "log") or ""
-            ).rstrip("\n")
+            else _as_message(
+                _first(payload, "message", "msg", "logmessage", "textpayload", "log")
+            )
         ),
         trace_id=_first(payload, "trace_id", "traceId", "traceID"),
         exception=_first(payload, "exception", "error", "stack_trace"),

@@ -132,6 +132,69 @@ class TestAzureLogAnalytics:
         assert entry.host == "aks-node-0"
         assert entry.timestamp is not None
 
+    def test_a_dynamic_log_message_is_unwrapped(self):
+        """LogMessage is a dynamic column, not a string: when the container
+        writes JSON it arrives as an object. Rendering that with str() gives a
+        Python repr with the fields still buried inside it.
+
+        Found by checking the published schema rather than by testing, because
+        the fixture and the parser were both written from the same assumption.
+        """
+        entry = parse_line(
+            '{"TimeGenerated":"2026-08-05T10:00:09Z","ContainerName":"api",'
+            '"LogLevel":"ERROR","LogMessage":{"level":"error",'
+            '"msg":"upstream connect error","trace_id":"chk-99"}}',
+            1,
+        )
+        assert entry.message == "upstream connect error"
+        assert entry.trace_id == "chk-99"
+        assert "{" not in entry.message
+
+    def test_a_string_log_message_still_works(self):
+        entry = parse_line(
+            '{"TimeGenerated":"2026-08-05T10:00:09Z","ContainerName":"api",'
+            '"LogMessage":"plain text failure"}',
+            1,
+        )
+        assert entry.message == "plain text failure"
+
+    def test_log_source_stderr_is_read_as_a_failure(self):
+        """Azure names the stream LogSource, not stream."""
+        entry = parse_line(
+            '{"TimeGenerated":"2026-08-05T10:00:09Z","ContainerName":"api",'
+            '"LogSource":"stderr","LogMessage":"boom"}',
+            1,
+        )
+        assert entry.level == "ERROR"
+
+    @pytest.mark.parametrize(
+        "level,expected",
+        [
+            ("CRITICAL", "FATAL"),
+            ("ERROR", "ERROR"),
+            ("WARNING", "WARN"),
+            ("INFO", "INFO"),
+            ("DEBUG", "DEBUG"),
+            ("TRACE", "DEBUG"),
+            ("UNKNOWN", "UNKNOWN"),
+        ],
+    )
+    def test_every_documented_log_level_value(self, level, expected):
+        """The schema lists exactly these possible values for LogLevel."""
+        line = (
+            f'{{"TimeGenerated":"2026-08-05T10:00:09Z","LogLevel":"{level}","LogMessage":"x"}}'
+        )
+        assert parse_line(line, 1).level == expected
+
+    def test_an_object_message_with_no_text_field_stays_valid_json(self):
+        entry = parse_line(
+            '{"TimeGenerated":"2026-08-05T10:00:09Z","LogMessage":{"code":42,"ok":true}}',
+            1,
+        )
+        import json as _json
+
+        assert _json.loads(entry.message) == {"code": 42, "ok": True}
+
 
 class TestCloudWatch:
     """EKS, via a CloudWatch Logs export."""
