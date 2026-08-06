@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from .drain import DrainTree
 from .models import FAILURE_LEVELS, LogEntry
 
 # Patterns whose matches are replaced before grouping errors together, so that
@@ -215,14 +216,27 @@ class ErrorGroup:
 
 
 def top_errors(entries: list[LogEntry], limit: int = 10) -> list[ErrorGroup]:
-    """Group failures by normalized message, most frequent first."""
-    groups: dict[str, list[LogEntry]] = defaultdict(list)
+    """Group failures into learned templates, most frequent first.
+
+    Grouping is done by Drain rather than by the fixed regexes in signature().
+    The regexes could only collapse variable shapes somebody had anticipated;
+    Drain discovers which token positions vary from the messages themselves,
+    so it groups 'Failed password for root' with 'Failed password for admin'
+    without anyone having declared that usernames are variable.
+    """
+    tree = DrainTree()
+    groups: dict[int, list[LogEntry]] = defaultdict(list)
+    templates: dict[int, object] = {}
+
     for entry in entries:
         if entry.is_failure:
-            groups[signature(entry.message)].append(entry)
+            template = tree.add(entry.message)
+            groups[id(template)].append(entry)
+            templates[id(template)] = template
 
     result = []
-    for sig, members in groups.items():
+    for key, members in groups.items():
+        sig = templates[key].text
         stamps = [m.timestamp for m in members if m.timestamp]
         result.append(
             ErrorGroup(

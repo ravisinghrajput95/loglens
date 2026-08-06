@@ -118,7 +118,18 @@ For open-ended questions where you don't know what to look at yet, the agent cho
 
 Two of these do most of the work.
 
-**Error grouping.** Messages that differ only in an id, hostname, or duration collapse into a single pattern. `Connection timeout after 5000ms to postgres-01` and `Connection timeout after 3000ms to postgres-04` become one entry reading `[2x] Connection timeout after <N>ms to <NAME>`. A fault hitting forty hosts shows up as one pattern with a count of forty, instead of forty lines that look unrelated.
+**Error grouping.** Templates are learned from the messages themselves, using [Drain](https://jiemingzhu.github.io/pub/pjhe_icws2017.pdf) — a fixed-depth parse tree that routes by token count and leading tokens, then discovers which positions vary. A fault hitting forty hosts shows up as one pattern with a count of forty, instead of forty lines that look unrelated.
+
+Learning beats declaring. An earlier version applied hand-written regexes for ids, hostnames and numbers, which only ever collapsed the variable shapes somebody had thought of. On 1,379 OpenSSH authentication failures:
+
+| | Groups | Top pattern |
+| --- | --- | --- |
+| Hand-written regexes | 185 | `Failed password for root from <IP> port <N>` — 368x |
+| Learned templates | **13** | `Failed password for <*> from <IP> port <*> ssh2` — **383x** |
+
+The regex version split one brute-force attack across a group per username, because usernames carry no digits or punctuation to key off. Nobody would have written a rule for them. Measured across eight real corpora, learned templates produce 1.0x–14.2x fewer groups than the regexes did.
+
+Two departures from the paper, both deliberate: ids, addresses and UUIDs are still masked before tokenising, since they vary per occurrence and would stop the tree generalising; and status and exit codes are held out of wildcarding, so an HTTP 503 and an HTTP 404 stay separate rather than merging an outage with a bad route.
 
 **Trace reconstruction.** If your logs carry a `trace_id`, `trace_timeline` orders one request across every service it touched and shows the elapsed time between hops:
 
@@ -396,6 +407,7 @@ CI runs lint, format check, tests and the offline evals on Python 3.11, 3.12 and
 loglens/
 ├── models.py     LogEntry, level normalization
 ├── parser.py     format detection, streaming reads, stack traces
+├── drain.py      log template mining, learned rather than declared
 ├── analysis.py   pure functions — the actual analysis
 ├── tools.py      LangChain tools wrapping those functions
 ├── agent.py      model wiring and system prompt
