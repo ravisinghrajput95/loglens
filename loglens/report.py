@@ -66,11 +66,16 @@ def sources(entries) -> list[str]:
     return lines
 
 
-def crossings(entries) -> list[str]:
+def crossings(entries, limit: int = 5) -> list[str]:
     """Traces that appear in more than one file.
 
     A request that failed in one service and was logged in another is exactly
     what a single-file tool cannot show, so it is called out explicitly.
+
+    Capped, and failing traces come first. On a real cluster every request
+    crosses every service, so listing them all buried the report under one
+    line per request — something a fixture with a single trace could not
+    reveal.
     """
     per_trace: dict[str, set[str]] = {}
     failing: set[str] = set()
@@ -85,10 +90,22 @@ def crossings(entries) -> list[str]:
     if not spanning:
         return []
 
+    # Failing traces first, then the ones spanning most files.
+    ordered = sorted(
+        spanning.items(),
+        key=lambda kv: (kv[0] not in failing, -len(kv[1]), kv[0]),
+    )
     lines = []
-    for trace_id, files in sorted(spanning.items(), key=lambda kv: -len(kv[1])):
+    for trace_id, files in ordered[:limit]:
         mark = " (contains failures)" if trace_id in failing else ""
         lines.append(f"  {trace_id}  spans {', '.join(sorted(files))}{mark}")
+
+    if len(ordered) > limit:
+        with_failures = sum(1 for t, _ in ordered if t in failing)
+        lines.append(
+            f"   … and {len(ordered) - limit} more traces cross files "
+            f"({with_failures} of {len(ordered)} contain failures)"
+        )
     return lines
 
 

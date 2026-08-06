@@ -397,6 +397,19 @@ def _flatten(payload: dict[str, Any]) -> dict[str, Any]:
 
     for key in _NESTED_PAYLOADS:
         inner = payload.get(key)
+
+        # A dynamic column survives export as a JSON-encoded string. Azure's
+        # own CLI returns LogMessage that way, so an application's structured
+        # log arrives as text and its trace id is invisible — which silently
+        # disables trace reconstruction on the entire ingestion path.
+        if isinstance(inner, str):
+            text = inner.strip()
+            if text.startswith("{") and text.endswith("}"):
+                try:
+                    inner = json.loads(text)
+                except ValueError:
+                    inner = None
+
         if isinstance(inner, dict):
             for k, v in inner.items():
                 flat.setdefault(k, v)

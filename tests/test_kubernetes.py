@@ -195,6 +195,48 @@ class TestAzureLogAnalytics:
 
         assert _json.loads(entry.message) == {"code": 42, "ok": True}
 
+    def test_a_json_encoded_log_message_is_unwrapped(self):
+        """The shape `az monitor log-analytics query` actually returns.
+
+        The schema calls LogMessage dynamic, so the object case was handled
+        first. The CLI serialises it as a JSON-encoded string instead, and a
+        real export showed 0 of 164 entries carrying a trace id — trace
+        reconstruction was silently dead on the whole AKS ingestion path.
+        Only running it against a live cluster surfaced that.
+        """
+        entry = parse_line(
+            '{"TimeGenerated":"2026-08-06T18:34:06.7Z","Computer":"aks-node",'
+            '"ContainerName":"api","PodName":"api-56f5","PodNamespace":"default",'
+            '"LogLevel":"info","LogSource":"stdout",'
+            '"LogMessage":"{\\"timestamp\\":\\"2026-08-06T18:34:06Z\\",'
+            '\\"level\\":\\"ERROR\\",\\"service\\":\\"api-gateway\\",'
+            '\\"message\\":\\"Upstream returned 502\\",'
+            '\\"trace_id\\":\\"chk-0\\"}"}',
+            1,
+        )
+        assert entry.message == "Upstream returned 502"
+        assert entry.trace_id == "chk-0"
+        # The application's own level and service beat the agent's guess and
+        # the container name.
+        assert entry.level == "ERROR"
+        assert entry.service == "api-gateway"
+
+    def test_a_plain_string_log_message_is_left_alone(self):
+        entry = parse_line(
+            '{"TimeGenerated":"2026-08-06T18:34:06Z","ContainerName":"api",'
+            '"LogMessage":"fatal: no space left on device"}',
+            1,
+        )
+        assert entry.message == "fatal: no space left on device"
+
+    def test_a_string_that_only_looks_like_json_is_not_mangled(self):
+        entry = parse_line(
+            '{"TimeGenerated":"2026-08-06T18:34:06Z","ContainerName":"api",'
+            '"LogMessage":"{not actually json}"}',
+            1,
+        )
+        assert entry.message == "{not actually json}"
+
 
 class TestCloudWatch:
     """EKS, via a CloudWatch Logs export."""
