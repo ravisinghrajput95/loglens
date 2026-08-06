@@ -306,6 +306,56 @@ _TEXT_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     ),
 )
 
+# The kubelet writes an RFC3339Nano timestamp, the stream, and a full/partial
+# tag before the container's own output:
+#   2026-08-05T10:00:01.123456789Z stdout F Server listening on port 8080
+# `kubectl logs --timestamps` produces the same prefix without the stream.
+_CRI_PREFIX = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))"
+    r"(?:\s+(?P<stream>stdout|stderr)(?:\s+(?P<tag>[PF]))?)?\s+(?P<rest>.*)$"
+)
+
+
+def parse_container_line(line: str, line_no: int = 0) -> LogEntry | None:
+    """Strip a kubelet timestamp prefix and parse what the container wrote.
+
+    The prefix is the kubelet's, not the application's. Discarding it and
+    re-parsing the remainder means a JSON or logback line keeps its own fields
+    instead of being reduced to opaque text after a timestamp.
+    """
+    match = _CRI_PREFIX.match(line)
+    if not match:
+        return None
+
+    rest = match.group("rest").strip()
+    if not rest:
+        return None
+
+    inner = parse_json_line(rest, line_no) or parse_logfmt_line(rest, line_no)
+    if inner is None:
+        inner, _ = parse_text_line(rest, line_no)
+
+    stamp = parse_timestamp(match.group("timestamp"))
+    if inner is not None:
+        # The container's own timestamp is better than the kubelet's, but the
+        # kubelet's is better than none.
+        inner.timestamp = inner.timestamp or stamp
+        inner.raw = line
+        if match.group("stream") == "stderr" and inner.level == "UNKNOWN":
+            inner.level = "ERROR"
+        return inner
+
+    return LogEntry(
+        line_no=line_no,
+        raw=line,
+        # stderr is where containers put failures, and it is a field the
+        # runtime recorded rather than a guess about wording.
+        level="ERROR" if match.group("stream") == "stderr" else "UNKNOWN",
+        timestamp=stamp,
+        message=rest,
+    )
+
+
 # Lines that continue the previous entry rather than starting a new one.
 _CONTINUATION = re.compile(
     r"^(?:\s+|at\s|Caused by:|\.\.\.\s*\d+\s+more|Traceback|\s*File\s\")",
@@ -318,10 +368,81 @@ _EXCEPTION_HEADER = re.compile(
 )
 
 
+# Cloud log platforms wrap a message in an envelope and capitalise their keys.
+# Azure writes LogMessage and TimeGenerated, Google nests the payload under
+# jsonPayload or textPayload and the container name under resource.labels.
+# Matching case-sensitively on top-level keys finds none of it.
+_NESTED_PAYLOADS = ("jsonPayload", "structPayload", "protoPayload", "fields", "data")
+
+
+def _flatten(payload: dict[str, Any]) -> dict[str, Any]:
+    """Lift nested cloud-envelope fields to the top level, without clobbering.
+
+    Only the shapes these platforms actually use are unwrapped, and an outer
+    key always wins: an envelope should not overwrite what the application
+    itself recorded.
+    """
+    flat = dict(payload)
+
+    for key in _NESTED_PAYLOADS:
+        inner = payload.get(key)
+        if isinstance(inner, dict):
+            for k, v in inner.items():
+                flat.setdefault(k, v)
+
+    # Google Cloud Logging carries the pod and container under resource.labels.
+    resource = payload.get("resource")
+    if isinstance(resource, dict):
+        labels = resource.get("labels")
+        if isinstance(labels, dict):
+            for k, v in labels.items():
+                flat.setdefault(k, v)
+
+    return flat
+
+
+def _audit_event(payload: dict[str, Any]) -> dict[str, str] | None:
+    """Render a Kubernetes audit event as something a person can read.
+
+    EKS, AKS and GKE all ship control-plane audit logs, and they carry no
+    message field at all — the event is spread across verb, requestURI and
+    responseStatus. Left alone every entry parses as an empty message, which
+    is exactly the shape that hides an RBAC denial.
+    """
+    if not str(payload.get("apiVersion", "")).startswith("audit.k8s.io"):
+        return None
+
+    status = payload.get("responseStatus")
+    code = status.get("code") if isinstance(status, dict) else None
+    user = payload.get("user")
+    username = user.get("username") if isinstance(user, dict) else None
+
+    parts = [str(payload.get("verb") or "?"), str(payload.get("requestURI") or "?")]
+    if code is not None:
+        parts.append(f"-> {code}")
+    if username:
+        parts.append(f"(user {username})")
+
+    level = "UNKNOWN"
+    if isinstance(code, int):
+        # The response code is the outcome the API server recorded. A 403 on a
+        # control-plane call is usually the thing being looked for.
+        level = "ERROR" if code >= 500 else "WARN" if code >= 400 else "INFO"
+
+    return {"message": " ".join(parts), "level": level}
+
+
 def _first(payload: dict[str, Any], *keys: str) -> Any:
+    """First key present, matched without regard to case or separators."""
     for key in keys:
         if key in payload and payload[key] is not None:
             return payload[key]
+
+    folded = {k.lower().replace("_", "").replace("-", ""): v for k, v in payload.items()}
+    for key in keys:
+        value = folded.get(key.lower().replace("_", "").replace("-", ""))
+        if value is not None:
+            return value
     return None
 
 
@@ -398,15 +519,53 @@ def parse_json_line(line: str, line_no: int = 0) -> LogEntry | None:
     if not isinstance(payload, dict):
         return None
 
+    payload = _flatten(payload)
+    audit = _audit_event(payload)
+
     latency = _first(payload, "latency_ms", "duration_ms", "elapsed_ms")
+    # A kubernetes audit event's "level" is its verbosity (Metadata, Request),
+    # not a severity, and reading it as one would label every audited call.
+    level_value = _first(payload, "level", "severity", "loglevel")
+    if audit:
+        level_value = audit["level"]
+    elif level_value is None and _first(payload, "stream") == "stderr":
+        # The container runtime recorded which stream this came from. Reading
+        # stderr as a failure uses a field that exists rather than guessing
+        # from wording.
+        level_value = "ERROR"
+
     return LogEntry(
         line_no=line_no,
         raw=line,
-        level=normalize_level(_first(payload, "level", "severity", "lvl")),
-        timestamp=parse_timestamp(_first(payload, "timestamp", "time", "@timestamp", "ts")),
-        service=_first(payload, "service", "logger"),
-        host=_first(payload, "host", "hostname"),
-        message=str(_first(payload, "message", "msg") or ""),
+        level=normalize_level(level_value),
+        timestamp=parse_timestamp(
+            _first(
+                payload,
+                "timestamp",
+                "time",
+                "@timestamp",
+                "ts",
+                "timegenerated",
+                "requestReceivedTimestamp",
+            )
+        ),
+        service=_first(
+            payload,
+            "service",
+            "logger",
+            "containername",
+            "container_name",
+            "logstreamname",
+            "unit",
+        ),
+        host=_first(payload, "host", "hostname", "computer", "node_name", "podname"),
+        message=(
+            audit["message"]
+            if audit
+            else str(
+                _first(payload, "message", "msg", "logmessage", "textpayload", "log") or ""
+            ).rstrip("\n")
+        ),
         trace_id=_first(payload, "trace_id", "traceId", "traceID"),
         exception=_first(payload, "exception", "error", "stack_trace"),
         latency_ms=float(latency) if isinstance(latency, (int, float)) else None,
@@ -542,6 +701,8 @@ def parse_line(line: str, line_no: int = 0, redact_secrets: bool = True) -> LogE
     if entry is None:
         entry = parse_logfmt_line(stripped, line_no)
     if entry is None:
+        entry = parse_container_line(stripped, line_no)
+    if entry is None:
         entry, _ = parse_text_line(stripped, line_no)
     if entry is None:
         return None
@@ -645,6 +806,8 @@ def iter_entries(path: str | Path, redact_secrets: bool = True) -> Iterator[LogE
             if entry is None:
                 entry = parse_logfmt_line(stripped, line_no)
             if entry is None:
+                entry = parse_container_line(stripped, line_no)
+            if entry is None:
                 entry, _ = parse_text_line(stripped, line_no)
 
             if entry is None:
@@ -705,6 +868,9 @@ def load_entries(
             if entry is None:
                 entry = parse_logfmt_line(stripped, line_no)
                 fmt = "logfmt" if entry is not None else ""
+            if entry is None:
+                entry = parse_container_line(stripped, line_no)
+                fmt = "container" if entry is not None else ""
             if entry is None:
                 entry, fmt = parse_text_line(stripped, line_no)
 

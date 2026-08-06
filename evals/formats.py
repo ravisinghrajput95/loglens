@@ -104,6 +104,40 @@ SAMPLES: list[Sample] = [
         "gin",
     ),
     Sample(
+        "Kubernetes (CRI node file)",
+        "2026-08-05T10:00:09.987654321Z stderr F connection refused",
+        "ERROR",
+        None,
+    ),
+    Sample(
+        "GKE (Cloud Logging)",
+        '{"severity":"ERROR","timestamp":"2026-08-05T10:00:09Z","resource":'
+        '{"labels":{"container_name":"api"}},"jsonPayload":{"message":"boom"}}',
+        "ERROR",
+        "api",
+    ),
+    Sample(
+        "AKS (Log Analytics)",
+        '{"TimeGenerated":"2026-08-05T10:00:09Z","ContainerName":"api",'
+        '"LogLevel":"error","LogMessage":"boom"}',
+        "ERROR",
+        "api",
+    ),
+    Sample(
+        "EKS (CloudWatch export)",
+        '{"timestamp":1785924009987,"message":"boom","logStreamName":"api-7f6d"}',
+        None,
+        "api-7f6d",
+    ),
+    Sample(
+        "Kubernetes audit event",
+        '{"apiVersion":"audit.k8s.io/v1","verb":"list","requestURI":"/api/v1/pods",'
+        '"responseStatus":{"code":403},"user":{"username":"system:node:x"},'
+        '"requestReceivedTimestamp":"2026-08-05T10:00:09Z"}',
+        "WARN",
+        None,
+    ),
+    Sample(
         "macOS install.log",
         "2026-06-03 10:52:41-07 localhost Installer Progress[57]: Progress UI Starting",
         "UNKNOWN",

@@ -229,6 +229,31 @@ Detected per line, so a file containing several formats is fine. Validated again
 
 Recognised formats: JSON lines, logfmt (Go ecosystem — Docker, Grafana, Loki), logback/log4j, syslog, Spark/JVM, HDFS, OpenStack, nginx error, Gin access logs, Apache, BGL/Thunderbird, Proxifier, pipe-delimited, macOS, and a loose fallback.
 
+### Kubernetes: EKS, AKS and GKE
+
+None of those platforms hands you a file — they route to CloudWatch, Azure Monitor and Cloud Logging — so what matters is whether what you get **out** of them is readable.
+
+| Source | How you get it | Status |
+| --- | --- | --- |
+| Application output | `kubectl logs pod > app.log` | ✅ parsed as whatever the app writes |
+| With kubelet timestamps | `kubectl logs --timestamps` | ✅ prefix stripped, app's own fields kept |
+| Node container files | `/var/log/pods/.../0.log` | ✅ CRI format; `stderr` read as a failure |
+| Docker json-file driver | `/var/lib/docker/containers/...` | ✅ including its `stream` field |
+| **GKE** | `gcloud logging read --format=json` | ✅ `jsonPayload`/`textPayload` unwrapped, container name from `resource.labels` |
+| **AKS** | Log Analytics `ContainerLogV2` | ✅ `TimeGenerated`, `LogLevel`, `LogMessage`, `ContainerName` |
+| **EKS** | CloudWatch Logs export | ✅ epoch-millis timestamps, `logStreamName` as the service |
+| Control-plane audit | any of the three | ✅ rendered readably, severity from the response code |
+
+Two things worth knowing. JSON keys are matched **without regard to case or separators**, which is what makes Azure's `LogMessage` and Google's `container_name` work; and cloud envelopes are unwrapped one level, with an outer field always winning so an envelope never overwrites what the application itself recorded.
+
+A Kubernetes audit event carries no message field at all — the event is spread across `verb`, `requestURI` and `responseStatus`. Parsed naively every entry has an empty message, which is exactly the shape that hides an RBAC denial. It now reads as `list /api/v1/namespaces/prod/pods -> 403 (user system:node:ip-10-0-1-2)`, with the severity taken from the response code. The audit event's own `level` field is verbosity (`Metadata`, `RequestResponse`), not severity, and is deliberately not read as one.
+
+```bash
+kubectl logs deploy/api --timestamps --since=1h > api.log
+kubectl logs deploy/orders --timestamps --since=1h > orders.log
+loglens report api.log orders.log        # merged, one timeline, traces followed across both
+```
+
 JSON keys are matched flexibly — `message`/`msg`, `trace_id`/`traceId`, `latency_ms`/`duration_ms` — and any key it doesn't model is kept and searchable. Multi-line stack traces fold into the entry they belong to, including the unindented header line that names the real exception. Gzipped logs are read directly.
 
 ### When a format carries no severity
