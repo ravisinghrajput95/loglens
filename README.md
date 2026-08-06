@@ -390,9 +390,7 @@ python -m evals.run
 ruff check . && ruff format --check .
 ```
 
-CI runs lint, format check, tests and the offline evals on Python 3.11, 3.12 and 3.13, then builds the package and installs the wheel into a clean environment and runs it — the only check that catches a package which builds but cannot be used.
-
-The distribution builds and passes `twine check`, but is **not published to PyPI yet**, so install from source for now.
+CI runs lint, format check, tests and the offline evals on Python 3.11, 3.12 and 3.13, then installs the package into a clean environment and runs it — the only check that catches a package which installs but cannot be used.
 
 ```text
 loglens/
