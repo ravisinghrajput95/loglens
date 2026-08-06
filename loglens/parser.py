@@ -25,6 +25,12 @@ from .safety import detect_injection
 # peak usage at around 50 MB regardless of how big the file on disk is.
 DEFAULT_MAX_ENTRIES = 100_000
 
+# Longest single field kept. Azure caps a log line at 64 KB and most lines are
+# a few hundred bytes; anything far past that is pathological rather than
+# informative, and every later stage — redaction, injection detection, template
+# mining — costs time proportional to it. Truncation is marked, not silent.
+MAX_FIELD_LENGTH = 16_384
+
 # Payload keys we promote onto LogEntry; everything else lands in `extra`.
 _KNOWN_KEYS = {
     "timestamp",
@@ -703,6 +709,17 @@ def sanitize(
     Injection detection runs on the original text: redaction rewrites parts of
     a line and could otherwise hide the phrasing that gives an attempt away.
     """
+    # Bound the fields before anything scans them.
+    for field_name in ("message", "raw"):
+        value = getattr(entry, field_name)
+        if value and len(value) > MAX_FIELD_LENGTH:
+            dropped = len(value) - MAX_FIELD_LENGTH
+            setattr(
+                entry,
+                field_name,
+                value[:MAX_FIELD_LENGTH] + f"… [truncated {dropped} characters]",
+            )
+
     findings = detect_injection(entry.message) or detect_injection(entry.raw)
     if findings:
         entry.injection = tuple(sorted({f.kind for f in findings}))

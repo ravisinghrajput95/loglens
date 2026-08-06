@@ -4,6 +4,8 @@ Logs are attacker-influenced input. These tests exist because the original
 design treated them as trusted text.
 """
 
+import json
+
 import pytest
 
 from loglens import analysis
@@ -206,3 +208,84 @@ class TestRegexSafety:
     def test_the_tool_reports_a_refusal_rather_than_hanging(self, json_log):
         out = search_logs.invoke({"file_path": json_log, "pattern": "(a+)+$"})
         assert "Rejected search pattern" in out
+
+
+class TestRedactionScalesLinearly:
+    """A single large line must not be able to stall the parser.
+
+    Several rules open with an unbounded character class before their anchor.
+    On a long run of characters the class accepts, the engine consumed to the
+    end, failed to find the anchor, and retried from the next position — a
+    200 KB line took over two minutes. Each rule now declares a literal it
+    cannot match without, and only the applicable rules are compiled.
+    """
+
+    def test_a_large_line_is_fast(self):
+        import time
+
+        text = "x" * 200_000
+        start = time.perf_counter()
+        redact(text)
+        elapsed = time.perf_counter() - start
+        # Was ~140 seconds. A generous ceiling still catches any regression to
+        # quadratic behaviour.
+        assert elapsed < 2.0, f"redaction took {elapsed:.1f}s on 200 KB"
+
+    def test_cost_grows_with_size_not_with_size_squared(self):
+        import time
+
+        def timed(n: int) -> float:
+            text = "x" * n
+            start = time.perf_counter()
+            redact(text)
+            return time.perf_counter() - start
+
+        small = timed(50_000)
+        large = timed(200_000)
+        # Four times the input. Quadratic would be sixteen times the work.
+        assert large < max(small * 8, 0.5)
+
+    @pytest.mark.parametrize(
+        "kind,sample",
+        [
+            ("DSN_CREDENTIALS", "postgres://admin:hunter2@db-01:5432/prod"),
+            ("EMAIL", "user@example.com"),
+            ("JWT", "eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3OCJ9.c2lnbmF0dXJl"),
+            ("AWS_ACCESS_KEY", "AKIA" + "IOSFODNN7EXAMPLE"),
+            ("GITHUB_TOKEN", "gh" + "p_" + "x" * 32),
+            ("SLACK_TOKEN", "xox" + "b-123456789012-abcdefghijkl"),
+            ("STRIPE_KEY", "sk" + "_" + "live" + "_" + "0" * 24),
+            ("GOOGLE_API_KEY", "AIza" + "0" * 35),
+            ("AUTH_HEADER", "Authorization: Bearer abc123def456"),
+            ("BEARER_TOKEN", "Bearer abcdefghijklmnop"),
+            ("SECRET_ASSIGNMENT", "api_key=abcdef123456"),
+            ("CARD_NUMBER", "card 4111111111111111 declined"),
+            ("SSN", "ssn 123-45-6789"),
+            (
+                "PRIVATE_KEY",
+                "-----BEGIN RSA PRIVATE KEY-----\nk\n-----END RSA PRIVATE KEY-----",
+            ),
+        ],
+    )
+    def test_skipping_inapplicable_rules_does_not_skip_applicable_ones(self, kind, sample):
+        """The guard is a literal each rule cannot match without. A wrong one
+        would silently disable that rule, which is the dangerous failure."""
+        result = redact(f"log line containing {sample} in it")
+        assert result.counts, f"{kind} no longer redacts"
+
+
+class TestLongFieldsAreBounded:
+    def test_a_huge_message_is_truncated_and_says_so(self, tmp_path):
+        from loglens.parser import MAX_FIELD_LENGTH
+
+        path = tmp_path / "huge.log"
+        path.write_text(json.dumps({"level": "ERROR", "message": "y" * 500_000}) + "\n")
+        entry = load_entries(str(path)).entries[0]
+
+        assert len(entry.message) < MAX_FIELD_LENGTH + 200
+        assert "truncated" in entry.message
+
+    def test_fields_within_the_limit_are_untouched(self, tmp_path):
+        path = tmp_path / "ok.log"
+        path.write_text(json.dumps({"level": "ERROR", "message": "z" * 100}) + "\n")
+        assert load_entries(str(path)).entries[0].message == "z" * 100
