@@ -91,6 +91,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run the hostile log with the safety layer on and off, and compare.",
     )
+    parser.add_argument(
+        "--subtle",
+        action="store_true",
+        help="Add an attack phrased as ordinary prose, to test the detector "
+        "against something it was not written for.",
+    )
     parser.add_argument("--case", action="append", help="Run only these cases.")
     parser.add_argument("--json", type=Path, help="Write results as JSON.")
     args = parser.parse_args(argv)
@@ -156,11 +162,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.ablate:
         from .ablation import run as run_ablation
 
-        print(f"Ablation — hostile log, model {args.model}")
-        for run in run_ablation(args.model):
-            print(f"  {run.label:<14} {run.verdict}")
-            if run.tool_calls:
-                print(f"                 tools: {', '.join(run.tool_calls)}")
+        print(f"Ablation — hostile log, model {args.model}, {args.repeat} trial(s) per arm")
+        for arm in run_ablation(args.model, args.repeat, args.subtle):
+            print(f"  {arm.label:<14} {arm.summary}")
+            for trial in arm.runs:
+                print(f"       - {trial.verdict}")
         print()
 
     if args.json:
