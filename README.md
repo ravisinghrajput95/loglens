@@ -380,6 +380,9 @@ Known blind spots: 5/5 wrong answers pass unflagged. These are not counted above
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add a log format, and
+[SECURITY.md](SECURITY.md) for what the tool defends against and what it does not.
+
 ```bash
 pip install -e ".[dev]"
 pytest              # 392 tests
@@ -387,7 +390,9 @@ python -m evals.run
 ruff check . && ruff format --check .
 ```
 
-CI runs lint, format check, tests and the offline evals on Python 3.11, 3.12 and 3.13.
+CI runs lint, format check, tests and the offline evals on Python 3.11, 3.12 and 3.13, then builds the package and installs the wheel into a clean environment and runs it — the only check that catches a package which builds but cannot be used.
+
+The distribution builds and passes `twine check`, but is **not published to PyPI yet**, so install from source for now.
 
 ```text
 loglens/
