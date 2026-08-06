@@ -4,6 +4,9 @@ on:
   push:
     branches: [master, main]
   pull_request:
+  # Lets a run be started by hand. Needed when GitHub declines to create one
+  # for a push, which is what a platform outage looks like from here.
+  workflow_dispatch:
 
 jobs:
   test:
