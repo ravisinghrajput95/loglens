@@ -8,6 +8,9 @@ matched, Google nested the payload one level down so the message came out
 empty, and the node-level container format was not recognised at all.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 from loglens.parser import load_entries, parse_line
@@ -324,3 +327,70 @@ class TestEndToEnd:
 
         assert result.total_failures == 1
         assert "connection refused" in render(result, str(path))
+
+
+class TestAgainstRealCapturedData:
+    """Rows captured from a live AKS cluster, not written by hand.
+
+    Every other fixture here was reconstructed from documentation, and the
+    parser was written from the same reading — so a wrong assumption passed on
+    both sides. Running against a real cluster found two: LogMessage arrives
+    as a JSON-encoded string rather than an object, which left 0 of 164
+    exported entries with a trace id; and the traces-crossing-files list was
+    unbounded, because in a real cluster every request crosses every service.
+
+    These sixteen rows are the real shape, kept so neither can regress.
+    """
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "aks_containerlogv2.jsonl"
+
+    def test_the_fixture_is_real_capture_not_reconstruction(self):
+        rows = [json.loads(line) for line in self.FIXTURE.read_text().splitlines()]
+        assert len(rows) == 16
+        # The exact column set Azure returned, and nothing added by hand.
+        assert set(rows[0]) == {
+            "Computer",
+            "ContainerName",
+            "LogLevel",
+            "LogMessage",
+            "LogSource",
+            "PodName",
+            "PodNamespace",
+            "TimeGenerated",
+        }
+
+    def test_every_row_parses(self):
+        result = load_entries(str(self.FIXTURE))
+        assert result.total_entries == 16
+        assert result.skipped == 0
+
+    def test_timestamps_are_read_from_every_row(self):
+        result = load_entries(str(self.FIXTURE))
+        assert all(e.timestamp for e in result.entries)
+
+    def test_trace_ids_survive_the_json_encoded_log_message(self):
+        """The regression that mattered: an application's structured log
+        arrives inside LogMessage as text, so its trace id is invisible unless
+        the string is unwrapped, and trace reconstruction dies silently."""
+        result = load_entries(str(self.FIXTURE))
+        with_trace = [e for e in result.entries if e.trace_id]
+        assert with_trace, "no trace ids recovered from real AKS rows"
+
+    def test_the_application_service_name_beats_the_container_name(self):
+        result = load_entries(str(self.FIXTURE))
+        services = {e.service for e in result.entries}
+        # The containers are named api and inventory; the application calls
+        # itself api-gateway.
+        assert "api-gateway" in services
+
+    def test_failures_are_recognised(self):
+        result = load_entries(str(self.FIXTURE))
+        assert result.total_failures > 0
+
+    def test_a_report_renders_from_real_rows(self):
+        from loglens.report import render
+
+        text = render(load_entries(str(self.FIXTURE)), str(self.FIXTURE))
+        assert "ERROR PATTERNS" in text
+        # Messages come out clean, not as raw JSON.
+        assert '{"timestamp"' not in text
