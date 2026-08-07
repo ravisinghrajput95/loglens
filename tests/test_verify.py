@@ -255,15 +255,6 @@ class TestSupportChecksAreWiredIn:
     `support.py`, so a check that stops being wired up fails here.
     """
 
-    def test_an_inverted_chain_reaches_the_report(self):
-        answer = (
-            "The notification service was the first thing to fail, and the "
-            "order service failed afterwards as a consequence [L12]."
-        )
-        report = verify(answer, SOURCES)
-        assert not report.clean
-        assert [i.kind for i in report.unsupported] == ["inverted-ordering"]
-
     def test_an_invented_count_reaches_the_report(self):
         answer = "The order service failed to publish to Kafka 47 times in the window [L12]."
         report = verify(answer, SOURCES)

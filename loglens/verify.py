@@ -37,7 +37,6 @@ from .support import (
     Unsupported,
     contradicted_by_level,
     index_evidence,
-    inverted_ordering,
     unsupported_counts,
 )
 
@@ -195,10 +194,8 @@ def verify(
     # itself on the shape of claim it can speak to.
     pairs = [(text, tuple(int(m) for m in CITATION.findall(text))) for text in units]
     evidence = index_evidence(sources)
-    report.unsupported = (
-        contradicted_by_level(pairs, evidence)
-        + unsupported_counts(pairs, evidence)
-        + inverted_ordering(pairs, evidence)
+    report.unsupported = contradicted_by_level(pairs, evidence) + unsupported_counts(
+        pairs, evidence
     )
 
     return report

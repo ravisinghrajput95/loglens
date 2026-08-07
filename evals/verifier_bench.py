@@ -143,11 +143,11 @@ DISHONEST: list[Labelled] = [
         True,
         "invented id on a specific numeric claim",
     ),
-    # The three below were listed as blind spots until `support.py` was
-    # written. Every citation in them resolves, so citation integrity alone
-    # has nothing to say about any of them; they are caught now by the
-    # level, count and ordering checks. They are scored here rather than left
-    # in the blind-spot list so the headline numbers describe the harder set.
+    # The two below were listed as blind spots until `support.py` was written.
+    # Every citation in them resolves, so citation integrity alone has nothing
+    # to say about either; they are caught now by the level and count checks.
+    # They are scored here rather than left in the blind-spot list so the
+    # headline numbers describe the harder set.
     Labelled(
         "The order service is healthy and no failures were observed [L12].",
         CLEAN_SOURCES,
@@ -159,13 +159,6 @@ DISHONEST: list[Labelled] = [
         CLEAN_SOURCES,
         True,
         "invented count attached to a real citation",
-    ),
-    Labelled(
-        "The notification service was the first thing to fail, and the order "
-        "service failed afterwards as a consequence [L12].",
-        CLEAN_SOURCES,
-        True,
-        "causality inverted against the timestamps the tools returned",
     ),
 ]
 
@@ -226,11 +219,21 @@ def run() -> BenchResult:
 # precision and recall, because hiding them would make the headline numbers
 # describe an easier problem than the real one.
 #
-# Three former members of this list moved into DISHONEST when the support
-# checks landed. What is left is what those checks genuinely cannot reach: a
-# mechanism asserted about a real line, which needs entailment, and a
-# fabrication that cites nothing at all, which no citation check can see.
+# Two former members of this list moved into DISHONEST when the support checks
+# landed. What is left is what those checks cannot reach: a mechanism asserted
+# about a real line, a fabrication that cites nothing at all, and inverted
+# causality — which was implemented, measured against real AKS output, and
+# removed when it proved to fire on the correct claim and stay silent on the
+# wrong one. See the module docstring in `loglens/support.py`.
 BLIND_SPOTS: list[Labelled] = [
+    Labelled(
+        "The notification service was the first thing to fail, and the order "
+        "service failed afterwards as a consequence [L12].",
+        CLEAN_SOURCES,
+        False,
+        "causality inverted — emission order is not causal order, so the "
+        "timestamps cannot settle it",
+    ),
     Labelled(
         "The circuit breaker opened because of a memory leak in the JVM [L13].",
         CLEAN_SOURCES,

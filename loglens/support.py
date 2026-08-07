@@ -20,6 +20,28 @@ behind each id, pulled back out of the tool output the model was shown. That is
 what this half of the module does. Reading it back from the rendered text,
 rather than being handed the entries alongside, keeps the check honest — it
 sees exactly what the model saw, including a line the renderer truncated.
+
+Two checks live here, on severity and on counts. A third — comparing the order
+a claim asserts against the order the log recorded — was written, measured, and
+removed. Its premise does not hold:
+
+    [L4] 18:34:06 ERROR api-gateway   Upstream returned 502 for /checkout
+    [L5] 18:34:07 ERROR inventory     Connection timeout to postgres-01
+
+That is real AKS output, in `tests/fixtures/aks_containerlogv2.jsonl`, and it
+recurs identically in the second incident at L15/L16. The gateway's 502 is the
+downstream symptom of the inventory timeout, and it is logged a second *before*
+its own cause. Both the envelope `TimeGenerated` and the application's own
+timestamp agree, so it is not an artifact of which clock is read.
+
+Emission order is not causal order, and across services it cannot be made into
+it: separate pods, on separate nodes, with independent clocks and independent
+buffering. Checked against that fixture, the ordering check fired on the
+causally correct claim and stayed silent on the inverted one — precisely
+backwards. Ordering claims are therefore left to the blind-spot list, where
+they are honestly described as uncaught, rather than policed by a rule that is
+wrong in the direction that matters. `tests/test_support.py` pins the
+counterexample so the idea is not rebuilt naively.
 """
 
 import re
@@ -400,197 +422,5 @@ def unsupported_counts(
                 )
             )
             break
-
-    return found
-
-
-# Generic words that name no particular service. Stripped before matching so
-# "order-service" in the log and "the order service" in a claim line up.
-_SERVICE_NOISE = {"service", "services", "svc", "the", "a", "an"}
-
-# Single tokens that are ordinary English as often as they are a service name.
-# Matching one of these alone would read "in order to" as the order service, so
-# they only count when the claim spells the word "service" out.
-_AMBIGUOUS_ALONE = {
-    "order",
-    "api",
-    "gateway",
-    "log",
-    "logs",
-    "event",
-    "events",
-    "data",
-    "host",
-    "node",
-    "time",
-    "check",
-    "test",
-    "search",
-    "index",
-    "store",
-    "queue",
-    "cache",
-}
-
-# The second service named is the earlier one.
-_REVERSING = re.compile(
-    r"\b(?:caused by|triggered by|due to|because of|downstream of|"
-    r"as a (?:consequence|result) of|(?:consequence|result) of|"
-    r"resulting from|resulted from|after|following|subsequent to)\b",
-    re.I,
-)
-# The first service named is the earlier one.
-_FORWARD = re.compile(
-    r"\b(?:then|afterwards?|subsequently|later|followed by|caused|triggered|"
-    r"led to|resulted in|cascaded (?:in)?to|propagated to|before)\b",
-    re.I,
-)
-# A service singled out as the start of the chain.
-_PRIMACY = re.compile(
-    r"\b(?:first|initially|initial|originally|earliest|began|begun|started|"
-    r"root cause|originated)\b",
-    re.I,
-)
-
-# Only compare times of day. The rendering carries no date, so a pair far
-# enough apart might straddle midnight and be in the opposite order to the one
-# the clock suggests.
-_MAX_ORDERING_GAP_SECONDS = 6 * 60 * 60
-
-
-def _normalise(text: str) -> str:
-    """Lowercase, split on punctuation, drop words that name nothing."""
-    words = re.split(r"[^a-z0-9]+", text.lower())
-    return " ".join(w for w in words if w and w not in _SERVICE_NOISE)
-
-
-def _mention_position(claim: str, service: str) -> int | None:
-    """Where a claim names this service, or None if it does not.
-
-    A multi-token name matches on its own. A single token that doubles as
-    ordinary English has to be followed by the word "service" to count.
-    """
-    normalised_claim = _normalise(claim)
-    name = _normalise(service)
-    if not name:
-        return None
-
-    pattern = re.compile(rf"\b{re.escape(name)}\b")
-    match = pattern.search(normalised_claim)
-    if not match:
-        return None
-
-    if " " not in name and name in _AMBIGUOUS_ALONE:
-        # `_normalise` has already removed the word, so look at the raw claim.
-        spelled_out = re.search(rf"\b{re.escape(name)}[\s\-_]+(?:service|svc)\b", claim, re.I)
-        if not spelled_out:
-            return None
-
-    return match.start()
-
-
-def _first_failure_times(evidence: dict[int, Evidence]) -> dict[str, time]:
-    """When each service was first seen failing, across all the evidence."""
-    earliest: dict[str, time] = {}
-    for item in evidence.values():
-        if not (item.service and item.stamp and item.has_level and item.is_failure):
-            continue
-        current = earliest.get(item.service)
-        if current is None or item.stamp < current:
-            earliest[item.service] = item.stamp
-    return earliest
-
-
-def _seconds(value: time) -> int:
-    return value.hour * 3600 + value.minute * 60 + value.second
-
-
-def _claimed_order(claim: str, first: str, second: str) -> tuple[str, str] | None:
-    """Which service does the claim put earlier?
-
-    `first` and `second` are the two services in the order they are named.
-    Returns (earlier, later), or None when the claim asserts no ordering.
-    """
-    start = _mention_position(claim, first)
-    end = _mention_position(claim, second)
-    if start is None or end is None:
-        return None
-
-    normalised = _normalise(claim)
-    between = normalised[start:end]
-
-    # "caused by" contains "caused", so the reversing sense is tested first.
-    if _REVERSING.search(between):
-        return second, first
-    if _FORWARD.search(between):
-        return first, second
-
-    # Neither connective: fall back to a service singled out as the start.
-    if _PRIMACY.search(between):
-        return first, second
-    if _PRIMACY.search(normalised[end:]):
-        return second, first
-
-    return None
-
-
-def inverted_ordering(
-    claims: list[tuple[str, tuple[int, ...]]],
-    evidence: dict[int, Evidence],
-) -> list[Unsupported]:
-    """Claims that put one service's failure before another's, backwards.
-
-    This is the failure that prompted the whole module: on real AKS data an
-    answer inverted a causal chain while every citation resolved cleanly. The
-    ordering is checked against every line the tools returned, not only the
-    cited ones, because that is what the model was shown.
-
-    Only failures with a timestamp read from the log take part, and only two
-    named services at a time — a claim naming three is past the point where a
-    string can settle what it meant.
-    """
-    found: list[Unsupported] = []
-    earliest = _first_failure_times(evidence)
-    if len(earliest) < 2:
-        return found
-
-    for text, cited in claims:
-        if not cited or not _TROUBLE.search(text):
-            continue
-
-        named = sorted(
-            (position, service)
-            for service in earliest
-            if (position := _mention_position(text, service)) is not None
-        )
-        if len(named) != 2:
-            continue
-
-        (_, first), (_, second) = named
-        order = _claimed_order(text, first, second)
-        if order is None:
-            continue
-
-        claimed_earlier, claimed_later = order
-        actual_earlier = earliest[claimed_earlier]
-        actual_later = earliest[claimed_later]
-        if abs(_seconds(actual_earlier) - _seconds(actual_later)) > _MAX_ORDERING_GAP_SECONDS:
-            continue
-        if actual_earlier <= actual_later:
-            continue
-
-        found.append(
-            Unsupported(
-                claim=text,
-                line_ids=cited,
-                kind="inverted-ordering",
-                detail=(
-                    f"the claim puts {claimed_earlier} before {claimed_later}, but "
-                    f"the log shows {claimed_later} failing first at "
-                    f"{actual_later.strftime('%H:%M:%S')} and {claimed_earlier} at "
-                    f"{actual_earlier.strftime('%H:%M:%S')}"
-                ),
-            )
-        )
 
     return found

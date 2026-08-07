@@ -14,10 +14,10 @@ from loglens.support import (
     asserts_no_failure,
     contradicted_by_level,
     index_evidence,
-    inverted_ordering,
     unsupported_counts,
 )
-from loglens.tools import top_errors
+from loglens.tools import search_logs, top_errors
+from loglens.verify import verify
 
 RENDERED = [
     "3 match(es):\n"
@@ -387,149 +387,43 @@ def test_a_count_beyond_real_tool_output_is_still_flagged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Inverted ordering: the claim runs the causal chain backwards
+# Why there is no ordering check
 # ---------------------------------------------------------------------------
 
 
-def test_inverted_causal_chain_is_flagged():
-    """The blind spot this check exists to close, and the one seen on real data."""
-    issues = inverted_ordering(
-        [
-            (
-                "The notification service was the first thing to fail, and the "
-                "order service failed afterwards as a consequence",
-                (12,),
-            )
-        ],
-        index_evidence(RENDERED),
-    )
-    assert len(issues) == 1
-    assert issues[0].kind == "inverted-ordering"
-    assert "order-service failing first" in issues[0].detail
+def test_emission_order_is_not_causal_order_on_real_aks_output():
+    """The counterexample that killed the ordering check.
 
+    A check comparing the order a claim asserts against the order the log
+    recorded looks obviously right, catches the 'causality inverted' blind
+    spot on synthetic data, and is wrong on real data in the direction that
+    matters.
 
-def test_the_same_chain_stated_correctly_is_not_flagged():
-    """The check must distinguish direction, not just detect an ordering."""
-    issues = inverted_ordering(
-        [
-            (
-                "The order service failed to publish to Kafka first, and the "
-                "notification service then refused SMTP",
-                (12,),
-            )
-        ],
-        index_evidence(RENDERED),
-    )
-    assert issues == []
+    In this capture from a live AKS cluster the api-gateway's 502 — the
+    downstream symptom — is logged a second *before* the inventory timeout
+    that caused it, and the same inversion recurs in the second incident.
+    Separate pods, separate nodes, independent clocks and buffering: emission
+    order is not causal order and cannot be made into it.
 
-
-def test_reversing_connective_is_read_backwards():
-    """'A failed because of B' puts B first, not A."""
-    wrong = "The order service failed because of the notification service outage"
-    assert inverted_ordering([(wrong, (12,))], index_evidence(RENDERED))
-
-    right = "The notification service refused SMTP because of the order service timeout"
-    assert inverted_ordering([(right, (14,))], index_evidence(RENDERED)) == []
-
-
-def test_caused_by_is_not_read_as_caused():
-    """'caused by' contains 'caused'; the reversing sense has to win."""
-    from loglens.support import _claimed_order
-
-    assert _claimed_order(
-        "the order service failed, caused by the notification service",
-        "order-service",
-        "notification-service",
-    ) == ("notification-service", "order-service")
-
-
-def test_a_claim_asserting_no_ordering_is_left_alone():
-    issues = inverted_ordering(
-        [("The order service and the notification service both logged errors", (12,))],
-        index_evidence(RENDERED),
-    )
-    assert issues == []
-
-
-def test_one_service_named_is_not_an_ordering():
-    issues = inverted_ordering(
-        [("The order service failed first and never recovered", (12,))],
-        index_evidence(RENDERED),
-    )
-    assert issues == []
-
-
-def test_ordinary_english_is_not_a_service_name():
-    """'in order to' must not be read as the order service."""
-    issues = inverted_ordering(
-        [
-            (
-                "In order to recover, the notification service was restarted "
-                "first after the failure",
-                (14,),
-            )
-        ],
-        index_evidence(RENDERED),
-    )
-    assert issues == []
-
-
-def test_a_service_named_without_the_word_service_still_matches():
-    """A log service called 'inventory' is unambiguous on its own."""
-    sources = [
-        "[L1] 20:15:00 ERROR inventory     Connection timeout to postgres-01\n"
-        "[L2] 20:15:30 ERROR api-gateway   Upstream returned 502 for /checkout\n"
-    ]
-    wrong = "The api gateway failed first and inventory timed out afterwards"
-    assert inverted_ordering([(wrong, (1,))], index_evidence(sources))
-
-
-def test_a_claim_with_no_failure_vocabulary_is_left_alone():
-    issues = inverted_ordering(
-        [("The notification service was mentioned first, then the order service", (12,))],
-        index_evidence(RENDERED),
-    )
-    assert issues == []
-
-
-def test_ordering_needs_timestamps_that_were_read():
-    """Trace steps render a gap instead of a clock; nothing can be ordered."""
-    sources = [
-        "   start    [L1] ERROR order-service          Failed to publish\n"
-        "   +  8000ms [L2] ERROR notification-service   SMTP refused\n"
-    ]
-    issues = inverted_ordering(
-        [("The notification service failed first, then the order service", (1,))],
-        index_evidence(sources),
-    )
-    assert issues == []
-
-
-def test_a_gap_wide_enough_to_straddle_midnight_is_left_alone():
-    """The rendering carries no date, so a wide gap cannot settle an order.
-
-    Here notification failed at 23:50 and order at 00:10 the next morning, so
-    the claim is right. By clock alone it reads as an inversion, and flagging
-    it would be a false positive on a correct answer.
+    This test asserts the shipped verifier stays silent on the causally
+    correct claim. If someone rebuilds the ordering check, it fails here.
     """
-    sources = [
-        "[L1] 23:50:00 ERROR notification-service   SMTP refused\n"
-        "[L2] 00:10:00 ERROR order-service          Failed to publish\n"
-    ]
-    issues = inverted_ordering(
-        [("The notification service failed first, then the order service", (1,))],
-        index_evidence(sources),
-    )
-    assert issues == []
+    sources = [search_logs.invoke({"file_path": "tests/fixtures/aks_containerlogv2.jsonl"})]
+    evidence = index_evidence(sources)
 
+    gateway = evidence[4]
+    inventory = evidence[5]
+    assert gateway.service == "api-gateway" and gateway.is_failure
+    assert inventory.service == "inventory" and inventory.is_failure
+    # The cause is logged after its own symptom.
+    assert gateway.stamp < inventory.stamp
 
-def test_simultaneous_failures_are_not_an_inversion():
-    sources = [
-        "[L1] 20:17:00 ERROR order-service          Failed to publish\n"
-        "[L2] 20:17:00 ERROR notification-service   SMTP refused\n"
-    ]
-    issues = inverted_ordering(
-        [("The notification service failed first, then the order service", (1,))],
-        index_evidence(sources),
+    correct = (
+        "The inventory service failed first, and the api gateway then "
+        "returned 502 as a downstream consequence"
     )
-    assert issues == []
+    report = verify(correct + " [L5].", sources)
+    assert report.unsupported == [], (
+        "the verifier flagged a causally correct claim — emission order was "
+        "used to settle causality"
+    )
