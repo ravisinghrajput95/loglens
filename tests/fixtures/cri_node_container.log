@@ -1,0 +1,5 @@
+2026-08-07T06:30:03.573232055Z stdout F starting up
+2026-08-07T06:30:03.57325693Z stdout F level=info msg="listening on :8080" service=demo
+2026-08-07T06:30:03.573312846Z stderr F ERROR: connection refused to postgres-01
+2026-08-07T06:30:05.576760208Z stdout F {"level":"error","msg":"upstream 502","service":"api"}
+2026-08-07T06:30:05.576773875Z stderr F panic: runtime error: index out of range

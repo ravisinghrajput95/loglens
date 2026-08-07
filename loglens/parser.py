@@ -83,6 +83,8 @@ _TIMESTAMP_FORMATS = (
 _YEARLESS_FORMATS = (
     ("%b %d %H:%M:%S", "%Y %b %d %H:%M:%S"),
     ("%m.%d %H:%M:%S", "%Y %m.%d %H:%M:%S"),  # Proxifier: 10.30 16:49:06
+    ("%m%d %H:%M:%S.%f", "%Y %m%d %H:%M:%S.%f"),  # klog: 0807 06:28:39.949093
+    ("%m%d %H:%M:%S", "%Y %m%d %H:%M:%S"),
 )
 
 # A two-digit UTC offset like "-07" is not something strptime accepts, but
@@ -163,6 +165,21 @@ _LEVEL_WORDS = (
 # Each pattern is tried in order. Named groups map onto LogEntry fields.
 _TEXT_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
     (
+        # klog, which is what every Kubernetes control-plane component writes:
+        #   I0807 06:28:39.949093       1 options.go:263] external host was not ...
+        # The leading letter is the severity. It has to be read, because klog
+        # sends all of it — INFO included — to stderr, and a reader that takes
+        # stderr as the severity calls a healthy control plane 100% errors.
+        "klog",
+        re.compile(
+            # The `file.go:263` is a source location, not a service. Naming it
+            # `service` would invent one service per source file and turn a
+            # single component into two hundred of them in the summary.
+            r"^(?P<level>[IWEF])(?P<timestamp>\d{4}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+"
+            r"(?P<thread>\d+)\s+(?P<where>[\w.\-/]+:\d+)\]\s?(?P<message>.*)$"
+        ),
+    ),
+    (
         # logback / log4j / python logging:
         #   2026-07-30 20:15:31,123 ERROR [order-service] com.foo.Bar - message
         "logback",
@@ -208,6 +225,18 @@ _TEXT_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
             rf"\[(?P<level>{_LEVEL_WORDS})\]\s*"
             r"(?:\[(?P<service>[^\]]+)\]\s*)?"
             r"(?P<message>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # CoreDNS, which is what resolves names in every Kubernetes cluster:
+        #   [INFO] plugin/reload: Running configuration SHA512 = 1b226df...
+        #   [ERROR] plugin/errors: 2 example.com. A: read udp timeout
+        # A level in brackets with no timestamp at all — the kubelet supplies
+        # the clock, so the component does not repeat it.
+        "coredns",
+        re.compile(
+            rf"^\[(?P<level>{_LEVEL_WORDS})\]\s+(?P<message>.*)$",
             re.IGNORECASE,
         ),
     ),
@@ -347,6 +376,9 @@ def parse_container_line(line: str, line_no: int = 0) -> LogEntry | None:
         # kubelet's is better than none.
         inner.timestamp = inner.timestamp or stamp
         inner.raw = line
+        # Only when the container's own output carried no severity. klog puts
+        # INFO and WARN on stderr too, so a control-plane component would
+        # otherwise be reported as failing on every single line.
         if match.group("stream") == "stderr" and inner.level == "UNKNOWN":
             inner.level = "ERROR"
         return inner
@@ -495,6 +527,9 @@ def _first(payload: dict[str, Any], *keys: str) -> Any:
 # properly rather than leaving to the loose fallback.
 _LOGFMT_PAIR = re.compile(r'([\w.-]+)=("(?:[^"\\]|\\.)*"|\S*)')
 _LOGFMT_LIKELY = re.compile(r"(?:^|\s)(?:time|ts|level|lvl|msg|message)=")
+# Enough of a klog line to recognise one; the full pattern lives in
+# _TEXT_PATTERNS. Used to stop logfmt claiming a klog line.
+_KLOG_PREFIX = re.compile(r"^[IWEF]\d{4}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\d+\s")
 
 
 def _unquote(value: str) -> str:
@@ -506,6 +541,22 @@ def _unquote(value: str) -> str:
 def parse_logfmt_line(line: str, line_no: int = 0) -> LogEntry | None:
     """Parse a logfmt line: time=... level=INFO msg="..." key=value."""
     if not _LOGFMT_LIKELY.search(line):
+        return None
+    # klog carries its severity in the leading letter and often writes a
+    # message body of key="value" pairs:
+    #   I0807 06:28:45 1 event.go:389] "Event occurred" kind="Lease" ...
+    # logfmt is tried before the text patterns in both dispatch paths, so
+    # without this it claims the line and the severity is lost — a real
+    # kube-controller-manager INFO line was read as UNKNOWN this way.
+    #
+    # The kubelet prefix has to be looked past, not just the bare line: on a
+    # node file the klog prefix sits after `<rfc3339> stderr F`, and checking
+    # only the start of the line misses every one of them.
+    probe = line
+    cri = _CRI_PREFIX.match(line)
+    if cri:
+        probe = cri.group("rest")
+    if _KLOG_PREFIX.match(probe):
         return None
 
     pairs = {k: _unquote(v) for k, v in _LOGFMT_PAIR.findall(line)}
@@ -640,6 +691,12 @@ def parse_text_line(line: str, line_no: int = 0) -> tuple[LogEntry | None, str]:
         service = groups.get("service") or groups.get("logger")
         if service is None and name == "nginx":
             service = "nginx"
+
+        # klog encodes severity as the single leading letter. Mapped here rather
+        # than in LEVEL_ALIASES so that a bare "E" or "F" in some other format
+        # is not silently promoted to a severity.
+        if name == "klog":
+            level = {"I": "INFO", "W": "WARN", "E": "ERROR", "F": "FATAL"}[groups["level"]]
 
         if name == "gin":
             service = service or "gin"
