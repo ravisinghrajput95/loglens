@@ -9,7 +9,7 @@ against a shape invented here.
 from datetime import datetime, time
 
 from loglens.models import LogEntry
-from loglens.support import index_evidence
+from loglens.support import asserts_no_failure, contradicted_by_level, index_evidence
 
 RENDERED = [
     "3 match(es):\n"
@@ -150,3 +150,104 @@ def test_lone_token_after_the_level_is_a_message_not_a_service():
     got = index_evidence(["[L5] 11:04:43 ERROR   restarting"])[5]
     assert got.service == ""
     assert got.message == "restarting"
+
+
+# ---------------------------------------------------------------------------
+# Contradiction: the claim says nothing failed, the cited line is a failure
+# ---------------------------------------------------------------------------
+
+
+def test_health_claim_citing_an_error_line_is_flagged():
+    """The blind spot this check exists to close."""
+    issues = contradicted_by_level(
+        [("The order service is healthy and no failures were observed", (12,))],
+        index_evidence(RENDERED),
+    )
+    assert len(issues) == 1
+    assert issues[0].kind == "contradiction"
+    assert issues[0].line_ids == (12,)
+    assert "ERROR" in issues[0].detail
+
+
+def test_honest_failure_claim_is_not_flagged():
+    issues = contradicted_by_level(
+        [("The order service failed to publish to Kafka topic orders-v1", (12,))],
+        index_evidence(RENDERED),
+    )
+    assert issues == []
+
+
+def test_health_claim_citing_a_non_failure_line_is_not_flagged():
+    issues = contradicted_by_level(
+        [("The order service operated normally", (13,))],
+        index_evidence(RENDERED),
+    )
+    assert issues == []
+
+
+def test_negated_health_phrase_is_not_read_as_health():
+    """'is not healthy' asserts the opposite; firing on it would be backwards."""
+    assert not asserts_no_failure("The order service is not healthy")
+    issues = contradicted_by_level(
+        [("The order service is not healthy", (12,))], index_evidence(RENDERED)
+    )
+    assert issues == []
+
+
+def test_mixed_claim_is_left_alone():
+    """'X is healthy but Y failed' also asserts a failure, so it is not this shape."""
+    text = "The gateway is healthy but the order service failed to publish"
+    assert not asserts_no_failure(text)
+    assert contradicted_by_level([(text, (12,))], index_evidence(RENDERED)) == []
+
+
+def test_temporally_scoped_claim_is_left_alone():
+    """'no failures after 20:18' is compatible with an error at 20:17."""
+    issues = contradicted_by_level(
+        [("No failures were observed after the circuit breaker opened", (12,))],
+        index_evidence(RENDERED),
+    )
+    assert issues == []
+
+
+def test_inferred_level_cannot_convict():
+    """A severity guessed from wording must not be used to call an answer wrong."""
+    inferred = ["[L9] 07:13:43 ERROR~sshd    Failed password for root"]
+    issues = contradicted_by_level(
+        [("The sshd service is healthy and no errors occurred", (9,))],
+        index_evidence(inferred),
+    )
+    assert issues == []
+
+
+def test_uncited_health_claim_is_not_this_checks_business():
+    """With no citation there is no evidence to contradict."""
+    assert (
+        contradicted_by_level([("Everything is healthy", ())], index_evidence(RENDERED)) == []
+    )
+
+
+def test_unknown_id_is_not_this_checks_business():
+    """A fabricated id is verify.py's job, not this one's."""
+    assert contradicted_by_level([("All is normal", (99,))], index_evidence(RENDERED)) == []
+
+
+def test_several_phrasings_of_health_are_recognised():
+    for text in (
+        "The service is healthy",
+        "No errors were observed in the window",
+        "The platform operated normally throughout",
+        "The request completed without any errors",
+        "Nothing was wrong with the order service",
+        "The cluster remained stable",
+    ):
+        assert asserts_no_failure(text), text
+
+
+def test_ordinary_failure_prose_is_not_health():
+    for text in (
+        "The order service failed to publish to Kafka",
+        "Connection refused by the SMTP server",
+        "The circuit breaker switched to OPEN",
+    ):
+        assert not asserts_no_failure(text), text

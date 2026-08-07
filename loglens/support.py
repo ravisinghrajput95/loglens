@@ -167,3 +167,139 @@ def index_evidence(sources: list[str]) -> dict[int, Evidence]:
             evidence[line_id] = Evidence(line_id=line_id, text=text)
 
     return evidence
+
+
+# ---------------------------------------------------------------------------
+# Support checks
+#
+# Each check looks for one mechanical contradiction between a claim and the
+# evidence it cites. They share a bias: stay silent unless the conflict is
+# unambiguous. A false positive on an honest answer costs more than a miss,
+# because it is the thing that gets the whole verifier switched off.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Unsupported:
+    """One claim that its own citation contradicts."""
+
+    claim: str
+    line_ids: tuple[int, ...]
+    kind: str
+    detail: str
+
+
+# Words that assert the absence of trouble.
+_HEALTH_STATE = re.compile(
+    r"\b(?:is|are|was|were|remained?|remains|appears?|seems?|looks?)\s+"
+    r"(?P<gap>(?:\w+\s+){0,2}?)"
+    r"(?:healthy|fine|normal|nominal|stable|unaffected|operational|uneventful)\b",
+    re.I,
+)
+_ABSENCE = re.compile(
+    r"\bno\s+(?:\w+\s+){0,2}?"
+    r"(?:errors?|failures?|problems?|issues?|faults?|outages?|exceptions?|timeouts?)\b",
+    re.I,
+)
+_NORMAL_OPERATION = re.compile(
+    r"\b(?:operated|operating|functioned|functioning|performed|ran|running)\s+"
+    r"(?:normally|as expected|without incident)\b",
+    re.I,
+)
+_WITHOUT_TROUBLE = re.compile(
+    r"\bwithout\s+(?:any\s+)?"
+    r"(?:errors?|failures?|problems?|issues?|incident|interruption)\b",
+    re.I,
+)
+_NOTHING_WRONG = re.compile(r"\bnothing\s+(?:was\s+|is\s+)?(?:wrong|failed|amiss)\b", re.I)
+
+_HEALTH_PATTERNS = (
+    _HEALTH_STATE,
+    _ABSENCE,
+    _NORMAL_OPERATION,
+    _WITHOUT_TROUBLE,
+    _NOTHING_WRONG,
+)
+
+# A negation inside a health phrase reverses it: "is not healthy" asserts the
+# opposite of "is healthy", and firing on it would be exactly backwards.
+_NEGATOR = re.compile(r"\b(?:not|never|hardly|barely|n't)\b", re.I)
+
+# Vocabulary that asserts something did go wrong.
+_TROUBLE = re.compile(
+    r"\b(?:error|errors|fail|failed|failing|failure|failures|timeout|timed out|"
+    r"exception|crash|crashed|refused|unavailable|outage|broke|broken|down|"
+    r"degraded|rejected|denied)\b",
+    re.I,
+)
+
+# A claim scoped to a window cannot be settled against a single line's level:
+# "no failures after 20:18" is compatible with an error at 20:17.
+_TEMPORAL_SCOPE = re.compile(
+    r"\b(?:after|before|since|until|between|prior to|following|once)\b", re.I
+)
+
+
+def asserts_no_failure(text: str) -> bool:
+    """Does this claim say that nothing went wrong?
+
+    Mixed claims — "the gateway is healthy but orders failed" — deliberately
+    do not count. The health phrases are blanked out and whatever trouble
+    vocabulary survives means the claim is also asserting a failure, which is
+    not the shape this check is looking for.
+    """
+    remainder = text
+    matched = False
+
+    for pattern in _HEALTH_PATTERNS:
+        for match in pattern.finditer(text):
+            if _NEGATOR.search(match.group(0)):
+                continue
+            matched = True
+            remainder = remainder.replace(match.group(0), " ")
+
+    if not matched:
+        return False
+    return not _TROUBLE.search(remainder)
+
+
+def contradicted_by_level(
+    claims: list[tuple[str, tuple[int, ...]]],
+    evidence: dict[int, Evidence],
+) -> list[Unsupported]:
+    """Claims of health that cite a line the log recorded as a failure.
+
+    Only a severity actually read from the log counts. One inferred from
+    message wording is a guess, and a guess must not be used to call an answer
+    wrong.
+    """
+    found: list[Unsupported] = []
+
+    for text, cited in claims:
+        if not cited or not asserts_no_failure(text):
+            continue
+        if _TEMPORAL_SCOPE.search(text):
+            continue
+
+        failures = [
+            evidence[i]
+            for i in cited
+            if i in evidence and evidence[i].has_level and evidence[i].is_failure
+        ]
+        if not failures:
+            continue
+
+        shown = failures[0]
+        found.append(
+            Unsupported(
+                claim=text,
+                line_ids=tuple(f.line_id for f in failures),
+                kind="contradiction",
+                detail=(
+                    f"the claim says nothing failed, but L{shown.line_id} is an "
+                    f"{shown.level} line: {shown.message or shown.text}"
+                ),
+            )
+        )
+
+    return found
