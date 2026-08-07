@@ -21,13 +21,25 @@ questions, each answerable deterministically:
   - Does every substantive claim carry a citation?          (uncited assertion)
   - Do any cited lines come from flagged, hostile content?  (poisoned evidence)
 
-What it still cannot do is judge whether a cited line supports the claim made
-about it. That needs entailment, not string matching, and is stated as a limit
-rather than implied away.
+A fourth question — does the cited line actually support the claim? — was for
+a long time answered only by saying it could not be. `support.py` now answers
+part of it: the mechanical contradictions, where the claim and the line it
+cites disagree about severity, about a count, or about which of two services
+failed first. That is not entailment, and it is not sold as entailment. It
+catches specific wrong answers and stays quiet on everything else, including
+plenty of wrong answers it has no way to see.
 """
 
 import re
 from dataclasses import dataclass, field
+
+from .support import (
+    Unsupported,
+    contradicted_by_level,
+    index_evidence,
+    inverted_ordering,
+    unsupported_counts,
+)
 
 # The citation form tools emit and the model is asked to reuse.
 CITATION = re.compile(r"\[L(\d+)\]")
@@ -78,6 +90,9 @@ class Report:
     uncited: list[Claim] = field(default_factory=list)
     poisoned: list[int] = field(default_factory=list)
     available: int = 0
+    # Claims whose own citation contradicts them. See `support.py` — these are
+    # narrow, deterministic checks, not entailment.
+    unsupported: list[Unsupported] = field(default_factory=list)
 
     @property
     def cited_claims(self) -> list[Claim]:
@@ -92,7 +107,7 @@ class Report:
 
     @property
     def clean(self) -> bool:
-        return not (self.unknown_citations or self.poisoned)
+        return not (self.unknown_citations or self.poisoned or self.unsupported)
 
 
 def available_ids(sources: list[str]) -> set[int]:
@@ -165,13 +180,26 @@ def verify(
 
     # Coverage is a separate question, and only meaningful for claims that
     # assert something about the log.
-    for text in split_claims(answer):
+    units = split_claims(answer)
+    for text in units:
         if not is_evidential(text):
             continue
         claim = Claim(text=text, citations=tuple(int(m) for m in CITATION.findall(text)))
         report.claims.append(claim)
         if not claim.cited:
             report.uncited.append(claim)
+
+    # Does the cited line actually support the claim? Only ever a partial
+    # answer — see `support.py` for why it is deliberately narrow. Run over
+    # every unit rather than only the evidential ones, since each check gates
+    # itself on the shape of claim it can speak to.
+    pairs = [(text, tuple(int(m) for m in CITATION.findall(text))) for text in units]
+    evidence = index_evidence(sources)
+    report.unsupported = (
+        contradicted_by_level(pairs, evidence)
+        + unsupported_counts(pairs, evidence)
+        + inverted_ordering(pairs, evidence)
+    )
 
     return report
 
@@ -199,6 +227,21 @@ def format_report(report: Report, strict: bool = False) -> str:
             "the system did."
         )
 
+    if report.unsupported:
+        many = len(report.unsupported) > 1
+        lines.append(
+            f"UNSUPPORTED BY THE CITED LINE: "
+            f"{len(report.unsupported)} claim{'s' if many else ''} "
+            f"{'contradict' if many else 'contradicts'} the evidence "
+            f"{'they cite' if many else 'it cites'}."
+        )
+        for issue in report.unsupported[:5]:
+            text = issue.claim if len(issue.claim) <= 90 else issue.claim[:87] + "..."
+            lines.append(f"  - {text}")
+            lines.append(f"      {issue.detail}")
+        if len(report.unsupported) > 5:
+            lines.append(f"  ... and {len(report.unsupported) - 5} more")
+
     if report.claims:
         pct = report.coverage * 100
         if report.uncited and (strict or pct < 100):
@@ -217,7 +260,8 @@ def format_report(report: Report, strict: bool = False) -> str:
         return ""
 
     lines.append(
-        "Verification checks that cited lines exist and are not hostile. It "
-        "cannot tell whether a line supports the claim made about it."
+        "Verification checks that cited lines exist, are not hostile, and do "
+        "not contradict the claim on level, count or ordering. It cannot tell "
+        "in general whether a line supports the claim made about it."
     )
     return "\n".join(lines)

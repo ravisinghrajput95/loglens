@@ -204,8 +204,11 @@ class TestFormatReport:
         assert "attacker" in text
 
     def test_the_limit_is_stated(self):
+        """The caveat must claim the support checks, and no more than them."""
         report = verify("The service failed with a timeout [L99].", SOURCES)
-        assert "cannot tell whether a line supports the claim" in format_report(report)
+        text = format_report(report)
+        assert "level, count or ordering" in text
+        assert "cannot tell in general whether a line supports the claim" in text
 
     def test_uncited_claims_are_truncated(self):
         long_claim = Claim(text="The service failed " + "x" * 300, citations=())
@@ -243,3 +246,52 @@ class TestTheObservedFailure:
         report = verify(answer, SOURCES, suspicious_ids(SOURCES))
         assert report.clean
         assert format_report(report) == ""
+
+
+class TestSupportChecksAreWiredIn:
+    """The support checks are only worth anything if verify() actually runs them.
+
+    Each of these goes through the public entry point rather than calling into
+    `support.py`, so a check that stops being wired up fails here.
+    """
+
+    def test_an_inverted_chain_reaches_the_report(self):
+        answer = (
+            "The notification service was the first thing to fail, and the "
+            "order service failed afterwards as a consequence [L12]."
+        )
+        report = verify(answer, SOURCES)
+        assert not report.clean
+        assert [i.kind for i in report.unsupported] == ["inverted-ordering"]
+
+    def test_an_invented_count_reaches_the_report(self):
+        answer = "The order service failed to publish to Kafka 47 times in the window [L12]."
+        report = verify(answer, SOURCES)
+        assert [i.kind for i in report.unsupported] == ["invented-quantity"]
+
+    def test_a_contradicted_level_reaches_the_report(self):
+        answer = "The order service is healthy and no failures were observed [L12]."
+        report = verify(answer, SOURCES)
+        assert [i.kind for i in report.unsupported] == ["contradiction"]
+
+    def test_an_honest_answer_stays_clean(self):
+        answer = (
+            "The order service failed to publish to Kafka [L12], its circuit "
+            "breaker then opened [L13], and the notification service refused "
+            "SMTP [L14]."
+        )
+        report = verify(answer, SOURCES)
+        assert report.unsupported == []
+        assert report.clean
+
+    def test_the_warning_names_the_claim_and_the_reason(self):
+        answer = "The order service is healthy and no failures were observed [L12]."
+        text = format_report(verify(answer, SOURCES))
+        assert "UNSUPPORTED BY THE CITED LINE" in text
+        assert "is healthy" in text
+        assert "ERROR line" in text
+
+    def test_an_unsupported_claim_makes_the_report_unclean(self):
+        """`clean` gates whether the user is warned at all."""
+        answer = "The order service is healthy and no failures were observed [L12]."
+        assert not verify(answer, SOURCES).clean

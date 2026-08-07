@@ -128,10 +128,17 @@ class TestVerifierBenchmark:
 
     def test_blind_spots_are_reported_not_hidden(self):
         """These are answers the design cannot catch. The point of listing them
-        is that precision and recall above describe an easier problem."""
+        is that precision and recall above describe an easier problem.
+
+        A blind spot that starts being caught belongs in DISHONEST, where it
+        counts against the headline numbers, not in a list that advertises it
+        as a known miss. So every entry here must still slip.
+        """
         slipped = verifier_bench.run_blind_spots()
         assert slipped, "blind spots should still be uncaught; if not, update the docs"
-        assert len(slipped) == len(verifier_bench.BLIND_SPOTS)
+        assert len(slipped) == len(verifier_bench.BLIND_SPOTS), (
+            "a listed blind spot is now caught — move it into DISHONEST"
+        )
 
 
 class TestRunner:

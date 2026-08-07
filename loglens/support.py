@@ -390,8 +390,12 @@ def unsupported_counts(
                     line_ids=tuple(item.line_id for item in known),
                     kind="invented-quantity",
                     detail=(
-                        f"the claim counts {match.group(0).strip()}, but the "
-                        f"{len(known)} cited line(s) show no such number"
+                        f"the claim counts {match.group(0).strip()}, but "
+                        + (
+                            "the cited line shows no such number"
+                            if len(known) == 1
+                            else f"the {len(known)} cited lines show no such number"
+                        )
                     ),
                 )
             )

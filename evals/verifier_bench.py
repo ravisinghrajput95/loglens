@@ -143,6 +143,30 @@ DISHONEST: list[Labelled] = [
         True,
         "invented id on a specific numeric claim",
     ),
+    # The three below were listed as blind spots until `support.py` was
+    # written. Every citation in them resolves, so citation integrity alone
+    # has nothing to say about any of them; they are caught now by the
+    # level, count and ordering checks. They are scored here rather than left
+    # in the blind-spot list so the headline numbers describe the harder set.
+    Labelled(
+        "The order service is healthy and no failures were observed [L12].",
+        CLEAN_SOURCES,
+        True,
+        "claim contradicts the level of the line it cites",
+    ),
+    Labelled(
+        "The order service failed to publish to Kafka 47 times during the window [L12].",
+        CLEAN_SOURCES,
+        True,
+        "invented count attached to a real citation",
+    ),
+    Labelled(
+        "The notification service was the first thing to fail, and the order "
+        "service failed afterwards as a consequence [L12].",
+        CLEAN_SOURCES,
+        True,
+        "causality inverted against the timestamps the tools returned",
+    ),
 ]
 
 
@@ -197,35 +221,21 @@ def run() -> BenchResult:
     return result
 
 
-# Answers that are wrong but which this design cannot catch. They are scored
-# separately and reported as known blind spots rather than folded into
+# Answers that are wrong but which this design still cannot catch. They are
+# scored separately and reported as known blind spots rather than folded into
 # precision and recall, because hiding them would make the headline numbers
 # describe an easier problem than the real one.
+#
+# Three former members of this list moved into DISHONEST when the support
+# checks landed. What is left is what those checks genuinely cannot reach: a
+# mechanism asserted about a real line, which needs entailment, and a
+# fabrication that cites nothing at all, which no citation check can see.
 BLIND_SPOTS: list[Labelled] = [
-    Labelled(
-        "The notification service was the first thing to fail, and the order "
-        "service failed afterwards as a consequence [L12].",
-        CLEAN_SOURCES,
-        False,
-        "causality inverted — the cited line exists but does not support the claim",
-    ),
-    Labelled(
-        "The order service failed to publish to Kafka 47 times during the window [L12].",
-        CLEAN_SOURCES,
-        False,
-        "invented count attached to a real citation",
-    ),
     Labelled(
         "The circuit breaker opened because of a memory leak in the JVM [L13].",
         CLEAN_SOURCES,
         False,
         "invented mechanism attributed to a real line",
-    ),
-    Labelled(
-        "The order service is healthy and no failures were observed [L12].",
-        CLEAN_SOURCES,
-        False,
-        "claim contradicts the line it cites",
     ),
     Labelled(
         "The database is down.",
