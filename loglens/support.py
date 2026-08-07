@@ -29,6 +29,9 @@ from datetime import time
 # Every id mentioned anywhere in a line of tool output.
 _LINE_ID = re.compile(r"\[L(\d+)\]")
 
+# Tools separate one rendered item from the next with a blank line.
+_BLOCKS = re.compile(r"\n\s*\n")
+
 # The `models.LogEntry.cite()` rendering:
 #   [L12] 20:17:00 ERROR order-service          Failed to publish to Kafka
 # Level is padded to 5 and followed by a marker column that is `~` when the
@@ -60,6 +63,11 @@ class Evidence:
     # append — an exception name, a SUSPICIOUS marker — falls outside the
     # evidence.
     text: str
+    # The blank-line-delimited block this line was rendered inside. Tools put
+    # a line's context around it rather than on it: `top_errors` renders the
+    # `[47x]` count five lines above the `example: [L12]` it belongs to, so a
+    # check that read only `text` would call a correct count invented.
+    block: str = ""
     level: str = ""
     service: str = ""
     message: str = ""
@@ -143,28 +151,30 @@ def index_evidence(sources: list[str]) -> dict[int, Evidence]:
     answers.
     """
     evidence: dict[int, Evidence] = {}
-    mentions: dict[int, str] = {}
+    mentions: dict[int, tuple[str, str]] = {}
 
     for source in sources:
-        for line in source.splitlines():
-            ids = [int(m) for m in _LINE_ID.findall(line)]
-            if not ids:
-                continue
+        for block in _BLOCKS.split(source):
+            for line in block.splitlines():
+                ids = [int(m) for m in _LINE_ID.findall(line)]
+                if not ids:
+                    continue
 
-            parsed = _parse_line(line)
-            if parsed is not None:
-                # A structured rendering wins over a passing mention, and the
-                # first one wins over a later repeat: tools list a line in full
-                # before summarising it.
-                evidence.setdefault(parsed.line_id, parsed)
-                ids = [i for i in ids if i != parsed.line_id]
+                parsed = _parse_line(line)
+                if parsed is not None:
+                    # A structured rendering wins over a passing mention, and
+                    # the first one wins over a later repeat: tools list a line
+                    # in full before summarising it.
+                    parsed.block = block
+                    evidence.setdefault(parsed.line_id, parsed)
+                    ids = [i for i in ids if i != parsed.line_id]
 
-            for line_id in ids:
-                mentions.setdefault(line_id, line.strip())
+                for line_id in ids:
+                    mentions.setdefault(line_id, (line.strip(), block))
 
-    for line_id, text in mentions.items():
+    for line_id, (text, block) in mentions.items():
         if line_id not in evidence:
-            evidence[line_id] = Evidence(line_id=line_id, text=text)
+            evidence[line_id] = Evidence(line_id=line_id, text=text, block=block)
 
     return evidence
 
@@ -301,5 +311,90 @@ def contradicted_by_level(
                 ),
             )
         )
+
+    return found
+
+
+# A count asserted about events: a bare integer followed by a counting noun,
+# optionally with one adjective between them. Requiring whitespace before the
+# noun keeps units out — "20%" and "5000ms" never match, and neither does the
+# `12` inside a `[L12]` citation.
+_COUNT_CLAIM = re.compile(
+    r"\b(?P<n>\d{1,9})\s+(?:\w+\s+){0,1}"
+    r"(?:times|occurrences|instances|events|entries|errors|failures|"
+    r"requests|attempts|retries|exceptions|timeouts|restarts)\b",
+    re.I,
+)
+
+
+# Numbers a tool renders as an explicit tally. Taken from the whole block, so
+# the `[47x]` heading of a mined pattern supports a claim about the example
+# line underneath it.
+_TALLY = re.compile(
+    r"\[(\d+)x\]"
+    r"|\b(\d+)\s+(?:match(?:es)?|distinct|entr(?:y|ies)|occurrence|"
+    r"error pattern|failure|step)"
+    r"|\bcount[:=]\s*(\d+)",
+    re.I,
+)
+
+
+def _digits_in(text: str) -> set[str]:
+    """Every run of digits on the evidence line itself, citation ids excluded.
+
+    The `12` in `[L12]` is an address, not a measurement, and must not license
+    a claim of twelve failures.
+    """
+    without_ids = _LINE_ID.sub(" ", text)
+    return set(re.findall(r"\d+", without_ids))
+
+
+def _tallies_in(block: str) -> set[str]:
+    """Numbers the surrounding block states as counts."""
+    return {group for match in _TALLY.findall(block) for group in match if group}
+
+
+def unsupported_counts(
+    claims: list[tuple[str, tuple[int, ...]]],
+    evidence: dict[int, Evidence],
+) -> list[Unsupported]:
+    """Counts asserted about events that the cited lines cannot add up to.
+
+    A rendered log line is evidence of one event. Citing three of them
+    supports "three times" and nothing larger. A number the evidence states
+    for itself — the `3x` on a mined pattern, a total in a summary — supports
+    whatever it says.
+    """
+    found: list[Unsupported] = []
+
+    for text, cited in claims:
+        known = [evidence[i] for i in cited if i in evidence]
+        if not known:
+            continue
+
+        stated: set[str] = set()
+        for item in known:
+            stated |= _digits_in(item.text)
+            stated |= _tallies_in(item.block)
+
+        for match in _COUNT_CLAIM.finditer(text):
+            raw = match.group("n")
+            if raw in stated:
+                continue
+            if int(raw) <= len(known):
+                continue
+
+            found.append(
+                Unsupported(
+                    claim=text,
+                    line_ids=tuple(item.line_id for item in known),
+                    kind="invented-quantity",
+                    detail=(
+                        f"the claim counts {match.group(0).strip()}, but the "
+                        f"{len(known)} cited line(s) show no such number"
+                    ),
+                )
+            )
+            break
 
     return found

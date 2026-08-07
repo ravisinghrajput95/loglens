@@ -6,10 +6,17 @@ emits — `LogEntry.cite()` and the trace steps in `report.py` — rather than
 against a shape invented here.
 """
 
+import json
 from datetime import datetime, time
 
 from loglens.models import LogEntry
-from loglens.support import asserts_no_failure, contradicted_by_level, index_evidence
+from loglens.support import (
+    asserts_no_failure,
+    contradicted_by_level,
+    index_evidence,
+    unsupported_counts,
+)
+from loglens.tools import top_errors
 
 RENDERED = [
     "3 match(es):\n"
@@ -251,3 +258,128 @@ def test_ordinary_failure_prose_is_not_health():
         "The circuit breaker switched to OPEN",
     ):
         assert not asserts_no_failure(text), text
+
+
+# ---------------------------------------------------------------------------
+# Invented quantities: a count the cited lines cannot add up to
+# ---------------------------------------------------------------------------
+
+
+def test_invented_count_on_a_real_citation_is_flagged():
+    """The blind spot this check exists to close."""
+    issues = unsupported_counts(
+        [("The order service failed to publish to Kafka 47 times during the window", (12,))],
+        index_evidence(RENDERED),
+    )
+    assert len(issues) == 1
+    assert issues[0].kind == "invented-quantity"
+    assert "47 times" in issues[0].detail
+
+
+def test_a_count_the_cited_lines_can_cover_is_not_flagged():
+    issues = unsupported_counts(
+        [("Two failures occurred, and 2 errors were logged", (12, 14))],
+        index_evidence(RENDERED),
+    )
+    assert issues == []
+
+
+def test_a_count_the_evidence_states_itself_is_not_flagged():
+    """A mined pattern rendered as `[3x]` supports a count of three."""
+    summary = ["  [3x] Failed to publish to Kafka\n        order-service  first at [L12]\n"]
+    issues = unsupported_counts(
+        [("The publish failure occurred 3 times", (12,))], index_evidence(summary)
+    )
+    assert issues == []
+
+
+def test_a_citation_id_is_not_a_supporting_number():
+    """The 12 in [L12] must not license a claim of 12 failures.
+
+    Uses evidence where the id is still on the line — a passing mention such
+    as `first at [L12]` — because that is the only place the id survives into
+    the evidence text and the guard can matter.
+    """
+    summary = ["  [1x] Kafka publish failed\n        order-service  first at [L12]\n"]
+    evidence = index_evidence(summary)
+    assert "[L12]" in evidence[12].text
+
+    issues = unsupported_counts(
+        [("The order service failed 12 times in the window", (12,))], evidence
+    )
+    assert len(issues) == 1
+
+
+def test_percentages_are_not_read_as_counts():
+    issues = unsupported_counts(
+        [("Errors accounted for 20% of entries in the sample", (12,))],
+        index_evidence(RENDERED),
+    )
+    assert issues == []
+
+
+def test_durations_are_not_read_as_counts():
+    issues = unsupported_counts(
+        [("The broker did not acknowledge after 5000ms and the request failed", (12,))],
+        index_evidence(RENDERED),
+    )
+    assert issues == []
+
+
+def test_uncountable_prose_is_not_flagged():
+    issues = unsupported_counts(
+        [("The order service failed to publish to Kafka topic orders-v1", (12,))],
+        index_evidence(RENDERED),
+    )
+    assert issues == []
+
+
+def test_unknown_ids_are_left_to_the_citation_check():
+    assert unsupported_counts([("Seen 99 times", (404,))], index_evidence(RENDERED)) == []
+
+
+def _recurring_error_log(tmp_path):
+    """A log where one pattern recurs seven times across hosts."""
+    rows = [
+        json.dumps(
+            {
+                "timestamp": f"2026-07-30T20:1{i}:00Z",
+                "level": "ERROR",
+                "service": "order-service",
+                "message": f"Failed to publish event to Kafka topic orders-v1 on host node-{i}",
+            }
+        )
+        for i in range(7)
+    ]
+    path = tmp_path / "recurring.jsonl"
+    path.write_text("\n".join(rows))
+    return str(path)
+
+
+def test_a_correct_count_against_real_tool_output_is_not_flagged(tmp_path):
+    """The count a tool renders sits above the example line, not on it.
+
+    `top_errors` puts `[7x]` five lines above the `example: [L1]` it belongs
+    to. A check reading only the cited line would call this correct claim
+    invented — the false positive that gets a verifier switched off. Built
+    from the real tool so it tracks the renderer.
+    """
+    sources = [top_errors.invoke({"file_path": _recurring_error_log(tmp_path)})]
+    assert "[7x]" in sources[0]
+
+    issues = unsupported_counts(
+        [("The Kafka publish failed 7 times across the window", (1,))],
+        index_evidence(sources),
+    )
+    assert issues == []
+
+
+def test_a_count_beyond_real_tool_output_is_still_flagged(tmp_path):
+    """The block licenses the number it states, not any number."""
+    sources = [top_errors.invoke({"file_path": _recurring_error_log(tmp_path)})]
+    issues = unsupported_counts(
+        [("The Kafka publish failed 400 times across the window", (1,))],
+        index_evidence(sources),
+    )
+    assert len(issues) == 1
+    assert "400 times" in issues[0].detail
