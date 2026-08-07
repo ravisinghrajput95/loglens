@@ -11,7 +11,11 @@ $ loglens report app.log --explain   # the same report, narrated by a local mode
 $ loglens "why did checkout fail?"   # ask an agent, which picks its own tools
 ```
 
+![loglens report running against a sample log and a real Kubernetes node file](docs/demo.gif)
+
 The analysis is ordinary Python: counts, groupings, timelines. A model is never required to produce a fact, only to interpret one. That division is the whole design.
+
+Every frame of that recording is real output. `scripts/record-demo.sh` regenerates it.
 
 ## `loglens report` — half a second, no dependencies beyond Python
 
@@ -227,7 +231,7 @@ Detected per line, so a file containing several formats is fine. Validated again
 
 **Before this validation, six of those corpora parsed at 0%.** The parser had only ever been tested against logs written for it. Ollama's 18% is honest rather than broken — most of that file is llama.cpp's free-form C++ diagnostics, which carry neither a timestamp nor a level, and guessing at them would manufacture entries that do not exist.
 
-Recognised formats: JSON lines, logfmt (Go ecosystem — Docker, Grafana, Loki), logback/log4j, syslog, Spark/JVM, HDFS, OpenStack, nginx error, Gin access logs, Apache, BGL/Thunderbird, Proxifier, pipe-delimited, macOS, and a loose fallback.
+Recognised formats: JSON lines, logfmt (Go ecosystem — Docker, Grafana, Loki), logback/log4j, syslog, Spark/JVM, HDFS, OpenStack, nginx error, Gin access logs, Apache, BGL/Thunderbird, Proxifier, pipe-delimited, macOS, klog (every Kubernetes component), CoreDNS, and a loose fallback.
 
 ### Kubernetes: EKS, AKS and GKE
 
@@ -237,7 +241,8 @@ None of those platforms hands you a file — they route to CloudWatch, Azure Mon
 | --- | --- | --- |
 | Application output | `kubectl logs pod > app.log` | ✅ parsed as whatever the app writes |
 | With kubelet timestamps | `kubectl logs --timestamps` | ✅ prefix stripped, app's own fields kept |
-| Node container files | `/var/log/pods/.../0.log` | ✅ CRI format; `stderr` read as a failure |
+| Node container files | `/var/log/pods/.../0.log` | ✅ CRI format; `stderr` read as a failure **only** when the line carries no level of its own |
+| kube-system components | same node files | ✅ klog severity read from the leading letter; CoreDNS's `[INFO]` too |
 | Docker json-file driver | `/var/lib/docker/containers/...` | ✅ including its `stream` field |
 | **GKE** | `gcloud logging read --format=json` | ✅ `jsonPayload`/`textPayload` unwrapped, container name from `resource.labels` |
 | **AKS** | Log Analytics `ContainerLogV2` | ✅ `TimeGenerated`, `LogLevel`, `LogMessage`, `ContainerName` |
@@ -245,6 +250,23 @@ None of those platforms hands you a file — they route to CloudWatch, Azure Mon
 | Control-plane audit | any of the three | ✅ rendered readably, severity from the response code |
 
 Two things worth knowing. JSON keys are matched **without regard to case or separators**, which is what makes Azure's `LogMessage` and Google's `container_name` work; and cloud envelopes are unwrapped one level, with an outer field always winning so an envelope never overwrites what the application itself recorded.
+
+### What a real control plane showed
+
+The node and component formats were tested only against synthetic samples for a long time, and they passed. Run against files taken off a running cluster, `kube-apiserver` parsed at 100% and came out as **217 entries, every one an ERROR**. The real severity is 116 INFO, 99 WARN, 2 ERROR.
+
+Every Kubernetes component logs through klog, and klog writes all of it to stderr — INFO included. Reading the CRI `stream` field as the severity therefore reports a perfectly healthy control plane as a total outage. It is the same failure as the syslog `0.0% errors` case further down, in the other direction, and no synthetic sample was ever going to catch it because the samples were written by someone who already believed the rule.
+
+The severity now comes from the klog letter:
+
+```
+I0807 06:28:39.949093       1 options.go:263] external host was not specified, using 172.19.0.3
+W0807 06:28:40.239800       1 logging.go:55] [core] grpc: addrConn.createTransport failed to connect
+```
+
+Two details that mattered. The `options.go:263` is a source location, not a service — read as one it turns a single component into two hundred services and makes the per-service breakdown useless. And klog event lines carry a body of `key="value"` pairs, which is indistinguishable from logfmt; logfmt is tried first and was swallowing them, so a real `kube-controller-manager` INFO line was being recorded as UNKNOWN.
+
+Fixtures now come from a live cluster rather than from imagination, and the test counts severities with a second implementation instead of asking the parser to confirm itself.
 
 A Kubernetes audit event carries no message field at all — the event is spread across `verb`, `requestURI` and `responseStatus`. Parsed naively every entry has an empty message, which is exactly the shape that hides an RBAC denial. It now reads as `list /api/v1/namespaces/prod/pods -> 403 (user system:node:ip-10-0-1-2)`, with the severity taken from the response code. The audit event's own `level` field is verbosity (`Metadata`, `RequestResponse`), not severity, and is deliberately not read as one.
 
@@ -471,7 +493,7 @@ loglens/
 
 ## Not built yet
 
-Live tailing, multi-file correlation, Kubernetes and Loki sources, and a structured report export.
+Live tailing, reading directly from Loki or a cloud logging API rather than from what you export out of it, and a structured report export. Multi-file correlation and the Kubernetes formats are done — see above.
 
 ## License
 
