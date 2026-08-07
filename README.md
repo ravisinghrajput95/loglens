@@ -343,6 +343,8 @@ Tools render each line with an id — `[L12] 20:17:00 ERROR order-service …` �
 | Does every cited id exist in what the tools returned? | Invented evidence |
 | Does every factual claim carry a citation? | Assertions resting on nothing |
 | Do any cited ids come from injection-flagged lines? | Repeating what an attacker wrote |
+| Does the claim contradict the severity of the line it cites? | "The service is healthy" citing an ERROR |
+| Can the cited lines add up to the count the claim asserts? | "Failed 47 times" citing one line |
 
 A real run against the weaker model:
 
@@ -361,7 +363,9 @@ Citation coverage 50% (6 of 12 factual claims cite a line). Uncited:
 
 **This replaced an earlier design that was worse than useless.** The first version compared quoted passages against tool output. It verified *provenance, not truth*: a passage that appeared in the log was marked supported — including a line an attacker had written. Anyone who could write one log line could get their claim certified. It also saw nothing unless the model used quotation marks, so dropping them hid any fabrication.
 
-**What it still cannot do** is judge whether a cited line actually supports the claim made about it. That needs entailment, not string matching. The warning says so explicitly rather than implying a guarantee it doesn't provide. Recommendations and advice are exempt from citation requirements — demanding evidence for "consider raising the timeout" produces noise, and a warning people learn to ignore is worse than no warning.
+The last two checks are newer, and narrower than they look. They do not judge in general whether a line supports the claim made about it — that needs entailment. They catch two *mechanical* contradictions: a claim that nothing failed while citing a line the log recorded as a failure, and a count larger than the cited lines can account for. Each is deliberately quiet. A negated phrase ("is **not** healthy"), a mixed claim ("the gateway is healthy but orders failed"), a claim scoped to a window ("no failures **after** 20:18"), and a severity that `--infer-severity` guessed rather than read are all left alone, because a false positive on an honest answer is what gets a verifier switched off. Measured against the labelled set below, they fire on none of the eight honest answers.
+
+**What it still cannot do** is judge whether a cited line actually supports the claim made about it, in general. The warning says so explicitly rather than implying a guarantee it doesn't provide. Recommendations and advice are exempt from citation requirements — demanding evidence for "consider raising the timeout" produces noise, and a warning people learn to ignore is worse than no warning.
 
 **The model is still the weak link, and model choice matters more than you would expect.** The tools are deterministic; the narration around them is not.
 
@@ -400,19 +404,39 @@ Two layers, kept apart so a regression can be attributed:
 
 ### Verifier precision and recall
 
-The checker is itself measured, against 16 hand-labelled answers — 8 honest, 8 fabricated:
+The checker is itself measured, against 18 hand-labelled answers — 8 honest, 10 fabricated:
 
 ```
-precision 1.00  recall 1.00  f1 1.00   (tp 8 fp 0 tn 8 fn 0)
-Known blind spots: 5/5 wrong answers pass unflagged. These are not counted above.
-  UNCAUGHT: causality inverted — the cited line exists but does not support the claim
-  UNCAUGHT: invented count attached to a real citation
+precision 1.00  recall 1.00  f1 1.00   (tp 10 fp 0 tn 8 fn 0)
+Known blind spots: 3/3 wrong answers pass unflagged. These are not counted above.
+  UNCAUGHT: causality inverted — emission order is not causal order, so the
+            timestamps cannot settle it
   UNCAUGHT: invented mechanism attributed to a real line
-  UNCAUGHT: claim contradicts the line it cites
   UNCAUGHT: fabrication with no citation at all
 ```
 
-**The blind spots are the honest part of that table.** A perfect score on a set the author wrote means the set is easy, not that the checker is complete. Those five answers are wrong, they pass, and they are listed so the headline numbers are read as describing the narrow problem they actually cover: citations that do not exist, and citations to hostile lines. Judging whether a real line supports the claim made about it needs entailment, and is not implemented.
+**The blind spots are the honest part of that table.** A perfect score on a set the author wrote means the set is easy, not that the checker is complete. Those answers are wrong, they pass, and they are listed so the headline numbers are read as describing the narrow problem they actually cover.
+
+Two entries left that list when the support checks landed — "invented count attached to a real citation" and "claim contradicts the line it cites" are now caught, and were moved into the scored set rather than kept as advertised misses, which is why the fabricated half grew from 8 to 10. A test fails if a listed blind spot starts passing, so the list cannot quietly go stale in either direction.
+
+### The ordering check that was built and then deleted
+
+The most interesting of the five blind spots was causal inversion — an answer that runs the chain backwards while every citation resolves. It was implemented: compare the order a claim asserts against the first-failure timestamps the tools returned. It closed the blind spot on the synthetic set and fired on none of the honest answers.
+
+Then it was run against the sixteen rows captured from a real AKS cluster:
+
+```
+[L4] 18:34:06 ERROR api-gateway   Upstream returned 502 for /checkout
+[L5] 18:34:07 ERROR inventory     Connection timeout after 5000ms to postgres-01
+```
+
+The gateway's 502 is the downstream symptom of the inventory timeout, and it is logged a full second **before its own cause**. The same inversion recurs in the second incident in that capture, and the Azure envelope's `TimeGenerated` and the application's own timestamp agree — so it is not an artifact of which clock is read.
+
+Against that file the check fired on the causally correct claim and stayed silent on the inverted one. Precisely backwards, on real data, on the exact failure it was written for.
+
+It is not fixable by tuning. These are separate pods on separate nodes with independent clocks and independent buffering: **emission order is not causal order**, and no comparison of timestamps can make it into one. A threshold that spared this one-second case would be fitted to this fixture, and clock skew between nodes is unbounded regardless.
+
+So the check was deleted, causal inversion went back onto the blind-spot list, and the counterexample is pinned by a test that fails if anyone rebuilds it — verified by rebuilding it. The two checks that survived contradiction and counting, are the ones whose premise holds.
 
 ## Development
 
@@ -421,7 +445,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add a log format, and
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 392 tests
+pytest              # 532 tests
 python -m evals.run
 ruff check . && ruff format --check .
 ```
@@ -439,6 +463,7 @@ loglens/
 ├── redact.py     strips credentials before anything is retained
 ├── safety.py     injection detection and fencing of untrusted content
 ├── verify.py     citation integrity, coverage, poisoned-evidence checks
+├── support.py    does the cited line contradict the claim? narrowly, and why
 └── cli.py        argument parsing, interactive session, streaming
 ```
 
