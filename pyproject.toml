@@ -29,10 +29,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+# The browser view. Kept out of the base install so `loglens report` still
+# runs on a clean Python with nothing but the parser's own dependencies.
+ui = ["streamlit>=1.40"]
+dev = ["pytest>=8.0", "ruff>=0.6", "streamlit>=1.40"]
 
 [project.scripts]
 loglens = "loglens.cli:main"
+loglens-ui = "loglens.ui_launch:main"
 
 [project.urls]
 Homepage = "https://github.com/ravisinghrajput95/loglens"

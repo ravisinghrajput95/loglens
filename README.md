@@ -102,6 +102,24 @@ FABRICATED CITATIONS: the answer cites L1, L2, L3, which the tools never
 returned. Those claims rest on nothing.
 ```
 
+## The browser view
+
+The same report, in a page you can filter and click through. Optional — it is an extra, so `loglens report` still runs on a clean Python.
+
+```bash
+pip install "loglens[ui]"
+loglens-ui app.log          # or: loglens-ui gateway.log orders.log
+```
+
+![The LogLens browser view](docs/ui.jpg)
+
+No fact is computed in the UI. It reads the same structured results the CLI does, which is why a test asserts the two report the same error rate for the same file — two presentations of one analysis must not disagree about a count. It needed **no change to any existing module**: `parser` and `analysis` between them pull in none of the terminal rendering, none of the tool wrappers, and no LangChain.
+
+Two rules it inherits and is tested on:
+
+- **It will not invent a severity.** A syslog file shows `—` for the error rate and says why, exactly as the CLI refuses to print `0.0% errors` for a log full of failures.
+- **Log content is rendered as text, never as markup.** A log line is attacker-influenced, and a browser is the one surface where that becomes executable. A test fails the build if `unsafe_allow_html` ever appears in that file, and `<script>` and `onerror=` payloads are checked to render inert.
+
 ## `loglens "question"` — the agent
 
 For open-ended questions where you don't know what to look at yet, the agent chooses among five tools and investigates. Slower, more flexible, same verification.
