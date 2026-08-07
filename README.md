@@ -403,7 +403,27 @@ Citation coverage 50% (6 of 12 factual claims cite a line). Uncited:
 
 **This replaced an earlier design that was worse than useless.** The first version compared quoted passages against tool output. It verified *provenance, not truth*: a passage that appeared in the log was marked supported — including a line an attacker had written. Anyone who could write one log line could get their claim certified. It also saw nothing unless the model used quotation marks, so dropping them hid any fabrication.
 
-The last two checks are newer, and narrower than they look. They do not judge in general whether a line supports the claim made about it — that needs entailment. They catch two *mechanical* contradictions: a claim that nothing failed while citing a line the log recorded as a failure, and a count larger than the cited lines can account for. Each is deliberately quiet. A negated phrase ("is **not** healthy"), a mixed claim ("the gateway is healthy but orders failed"), a claim scoped to a window ("no failures **after** 20:18"), and a severity that `--infer-severity` guessed rather than read are all left alone, because a false positive on an honest answer is what gets a verifier switched off. Measured against the labelled set below, they fire on none of the eight honest answers.
+There is a fourth outcome, and on real answers it is the common one: **the model cites nothing at all.** That is reported separately from low coverage, because the difference matters. Partial coverage means some claims were checked. No citations anywhere means the citation checks never ran on anything, and reporting "0 fabricated citations" for such an answer describes an absence of evidence rather than a clean result.
+
+```
+NOTHING TO VERIFY: the answer makes 7 factual claim(s) about the log and
+cites no line for any of them. None of it rests on evidence the tools
+returned, and none of it was checked — this is not the same as an answer
+that passed.
+```
+
+Measured across the nine eval cases, one run each:
+
+| Model | Answers citing nothing | Median coverage |
+| --- | --- | --- |
+| `llama3.2` (3B) | **9 / 9** | 0% |
+| `gemma4` (8B) | 4 / 9 | 17% |
+
+`llama3.2` wrote three to seven factual claims per answer and cited a line for none of them, every time. This is the agent path; `--explain` is the opposite case, because the model is handed every line id up front in a single call.
+
+The last two checks in the table are newer, and narrower than they look. They do not judge in general whether a line supports the claim made about it — that needs entailment. They catch two *mechanical* contradictions: a claim that nothing failed while citing a line the log recorded as a failure, and a count larger than the cited lines can account for. Each is deliberately quiet. A negated phrase ("is **not** healthy"), a mixed claim ("the gateway is healthy but orders failed"), a claim scoped to a window ("no failures **after** 20:18"), and a severity that `--infer-severity` guessed rather than read are all left alone, because a false positive on an honest answer is what gets a verifier switched off.
+
+They fire on none of the eight honest answers in the labelled set — and, more usefully, **on none of the eighteen real model answers** from the live eval runs above. A set the author wrote can only show a check is not obviously broken; real output is the distribution that decides whether it is safe to ship.
 
 **What it still cannot do** is judge whether a cited line actually supports the claim made about it, in general. The warning says so explicitly rather than implying a guarantee it doesn't provide. Recommendations and advice are exempt from citation requirements — demanding evidence for "consider raising the timeout" produces noise, and a warning people learn to ignore is worse than no warning.
 
@@ -485,7 +505,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add a log format, and
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 563 tests
+pytest              # 569 tests
 python -m evals.run
 ruff check . && ruff format --check .
 ```
