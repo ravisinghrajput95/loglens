@@ -1,0 +1,152 @@
+"""Reading tool output back into the evidence behind each citation.
+
+The support checks are only as good as what they think the cited line said, so
+these tests pin the parsing against the renderings this codebase actually
+emits — `LogEntry.cite()` and the trace steps in `report.py` — rather than
+against a shape invented here.
+"""
+
+from datetime import datetime, time
+
+from loglens.models import LogEntry
+from loglens.support import index_evidence
+
+RENDERED = [
+    "3 match(es):\n"
+    "[L12] 20:17:00 ERROR order-service          Failed to publish to Kafka topic orders-v1\n"
+    "[L13] 20:17:05 WARN  order-service          Circuit breaker switched to OPEN\n"
+    "[L14] 20:17:08 ERROR notification-service   SMTP connection refused\n"
+]
+
+
+def test_indexes_every_rendered_line():
+    evidence = index_evidence(RENDERED)
+    assert set(evidence) == {12, 13, 14}
+
+
+def test_reads_level_service_and_message():
+    got = index_evidence(RENDERED)[12]
+    assert got.level == "ERROR"
+    assert got.service == "order-service"
+    assert got.message == "Failed to publish to Kafka topic orders-v1"
+    assert got.stamp == time(20, 17, 0)
+    assert got.is_failure
+
+
+def test_non_failure_level_is_not_a_failure():
+    assert not index_evidence(RENDERED)[13].is_failure
+
+
+def test_text_keeps_the_whole_line_minus_the_id():
+    got = index_evidence(RENDERED)[14]
+    assert got.text.startswith("20:17:08 ERROR")
+    assert "SMTP connection refused" in got.text
+    assert "[L14]" not in got.text
+
+
+def test_parses_what_cite_actually_renders():
+    """The index must track the renderer, not a guess at it."""
+    entry = LogEntry(
+        line_no=42,
+        raw="",
+        level="ERROR",
+        service="payments",
+        message="Upstream returned 502",
+        timestamp=datetime(2026, 7, 30, 20, 15, 31),
+    )
+
+    got = index_evidence([entry.cite()])[42]
+    assert got.level == "ERROR"
+    assert got.service == "payments"
+    assert got.message == "Upstream returned 502"
+    assert got.stamp == time(20, 15, 31)
+
+
+def test_trace_step_rendering_without_a_clock():
+    """report.py renders trace steps with a gap where the timestamp goes."""
+    step = "   +   5847ms [L13] WARN  order-service        Circuit breaker OPEN"
+    got = index_evidence([step])[13]
+    assert got.level == "WARN"
+    assert got.service == "order-service"
+    assert got.message == "Circuit breaker OPEN"
+    assert got.stamp is None
+
+
+def test_missing_timestamp_renders_and_parses_as_absent():
+    line = "[L7] --:--:-- ERROR db   Connection refused"
+    got = index_evidence([line])[7]
+    assert got.stamp is None
+    assert got.level == "ERROR"
+
+
+def test_inferred_level_is_not_treated_as_read():
+    """`--infer-severity` marks a guessed level with `~`.
+
+    A claim about failure cannot be settled against a level nobody logged.
+    """
+    line = "[L9] 07:13:43 ERROR~sshd                  Failed password for root"
+    got = index_evidence([line])[9]
+    assert got.level == "ERROR"
+    assert got.level_inferred
+    assert not got.has_level
+
+
+def test_read_level_counts_as_read():
+    assert index_evidence(RENDERED)[12].has_level
+
+
+def test_line_with_no_level_column_keeps_its_message():
+    """Syslog and friends carry no severity at all."""
+    line = "[L5] 11:04:43       sshd                   Accepted publickey for ravi"
+    got = index_evidence([line])[5]
+    assert got.level == ""
+    assert not got.has_level
+    assert "Accepted publickey" in got.message
+
+
+def test_passing_mention_is_kept_as_evidence():
+    """`first at [L12]` inside a pattern summary is still something."""
+    summary = (
+        "  [3x] Failed to publish event to Kafka topic <NAME>\n"
+        "        order-service  20:17:00-20:17:00  first at [L12]\n"
+    )
+    got = index_evidence([summary])[12]
+    assert "Failed to publish" not in got.text or "first at" in got.text
+    assert got.line_id == 12
+
+
+def test_full_rendering_beats_a_passing_mention():
+    """A line listed in full and then summarised keeps the full version."""
+    sources = RENDERED + [
+        "  [1x] Kafka publish failed\n        order-service  first at [L12]\n"
+    ]
+    got = index_evidence(sources)[12]
+    assert got.service == "order-service"
+    assert got.message == "Failed to publish to Kafka topic orders-v1"
+
+
+def test_mention_only_id_has_no_invented_level():
+    """Absence of evidence must not be rendered as evidence of health."""
+    got = index_evidence(["  [1x] something\n        svc  first at [L88]\n"])[88]
+    assert got.level == ""
+    assert not got.has_level
+    assert not got.is_failure
+
+
+def test_uncited_source_text_yields_nothing():
+    assert index_evidence(["no citations here at all"]) == {}
+
+
+def test_empty_sources():
+    assert index_evidence([]) == {}
+
+
+def test_lone_token_after_the_level_is_a_message_not_a_service():
+    """A one-word message must not be promoted into the service column.
+
+    Later checks compare services by name, so inventing one from the only
+    token on the line would attribute a claim to a service nobody logged.
+    """
+    got = index_evidence(["[L5] 11:04:43 ERROR   restarting"])[5]
+    assert got.service == ""
+    assert got.message == "restarting"
