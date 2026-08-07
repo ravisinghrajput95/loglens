@@ -94,7 +94,12 @@ CASES: list[Case] = [
                 for i in range(10)
             ]
         ),
-        expect_mentions=["no error"],
+        # Any of these says the same thing. An earlier version demanded the
+        # exact substring "no error" and failed gemma4 for writing "no
+        # failures" and "0.0%" instead, which is the same answer.
+        expect_mentions=[
+            "no error|no failure|healthy|0.0%|no issue|normally|no recorded error"
+        ],
         expect_absent=["root cause", "critical failure"],
         expect_total_entries=10,
         expect_failures=0,
