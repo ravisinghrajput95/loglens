@@ -98,6 +98,22 @@ class Report:
         return [c for c in self.claims if c.cited]
 
     @property
+    def unverified(self) -> bool:
+        """Did the answer assert things about the log and cite nothing at all?
+
+        Distinct from low coverage, and worth separating. Partial coverage
+        means some claims were checked; *no* citations anywhere means the
+        citation checks never ran on anything, and "0 fabricated citations"
+        then describes an absence of evidence rather than a clean bill of
+        health.
+
+        This is the dominant shape of real output from the smaller models: on
+        the nine eval cases `llama3.2` cited nothing on any of them while
+        writing several paragraphs of confident findings each time.
+        """
+        return bool(self.claims) and not self.cited_claims
+
+    @property
     def coverage(self) -> float:
         """Share of evidential claims that carry a citation."""
         if not self.claims:
@@ -106,7 +122,9 @@ class Report:
 
     @property
     def clean(self) -> bool:
-        return not (self.unknown_citations or self.poisoned or self.unsupported)
+        return not (
+            self.unknown_citations or self.poisoned or self.unsupported or self.unverified
+        )
 
 
 def available_ids(sources: list[str]) -> set[int]:
@@ -239,7 +257,20 @@ def format_report(report: Report, strict: bool = False) -> str:
         if len(report.unsupported) > 5:
             lines.append(f"  ... and {len(report.unsupported) - 5} more")
 
-    if report.claims:
+    if report.unverified:
+        lines.append(
+            f"NOTHING TO VERIFY: the answer makes {len(report.claims)} factual "
+            "claim(s) about the log and cites no line for any of them. None of "
+            "it rests on evidence the tools returned, and none of it was "
+            "checked — this is not the same as an answer that passed."
+        )
+        for claim in report.claims[:3]:
+            text = claim.text if len(claim.text) <= 110 else claim.text[:107] + "..."
+            lines.append(f"  - {text}")
+        if len(report.claims) > 3:
+            lines.append(f"  ... and {len(report.claims) - 3} more")
+
+    if report.claims and not report.unverified:
         pct = report.coverage * 100
         if report.uncited and (strict or pct < 100):
             lines.append(

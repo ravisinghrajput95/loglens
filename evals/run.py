@@ -74,9 +74,12 @@ def run_live(cases, model: str, repeat: int) -> list[AnswerResult]:
                     f"  {mark} {case.name:<28} {scored.passed}/{scored.total} checks  "
                     f"coverage {scored.coverage * 100:3.0f}%  "
                     f"fabricated {scored.fabricated}  "
+                    f"unsupported {scored.unsupported}  "
                     f"{len(calls)} calls  {elapsed:.0f}s",
                     flush=True,
                 )
+                for detail in scored.unsupported_detail:
+                    print(f"       ! {detail}", flush=True)
 
     return results
 
@@ -188,8 +191,15 @@ def main(argv: list[str] | None = None) -> int:
                             "coverage": r.coverage,
                             "fabricated": r.fabricated,
                             "poisoned": r.poisoned,
+                            "unsupported": r.unsupported,
+                            "unsupported_detail": r.unsupported_detail,
                             "tool_calls": r.tool_calls,
                             "seconds": r.seconds,
+                            # The answer itself, so a run can be audited after
+                            # the fact instead of only counted. Without it the
+                            # only way to see why a check fired is to run the
+                            # model again and hope for the same output.
+                            "answer": r.answer,
                         }
                         for r in live_results
                     ],

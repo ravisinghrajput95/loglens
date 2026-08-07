@@ -212,15 +212,22 @@ class TestFormatReport:
 
     def test_uncited_claims_are_truncated(self):
         long_claim = Claim(text="The service failed " + "x" * 300, citations=())
-        report = Report(claims=[long_claim], uncited=[long_claim])
+        anchor = Claim(text="The order service failed to publish [L12]", citations=(12,))
+        report = Report(claims=[anchor, long_claim], uncited=[long_claim])
         assert "..." in format_report(report, strict=True)
 
     def test_many_uncited_claims_are_summarized(self):
+        """Coverage summarisation, which is about *partial* citation.
+
+        One cited claim keeps this on the coverage path: an answer citing
+        nothing at all is a different finding and says so instead.
+        """
+        anchor = Claim(text="The order service failed to publish [L12]", citations=(12,))
         claims = [
             Claim(text=f"The service {i} failed with a connection timeout error", citations=())
             for i in range(9)
         ]
-        report = Report(claims=claims, uncited=claims)
+        report = Report(claims=[anchor, *claims], uncited=claims)
         assert "and 4 more" in format_report(report, strict=True)
 
 
@@ -286,3 +293,75 @@ class TestSupportChecksAreWiredIn:
         """`clean` gates whether the user is warned at all."""
         answer = "The order service is healthy and no failures were observed [L12]."
         assert not verify(answer, SOURCES).clean
+
+
+class TestNothingToVerify:
+    """An answer that cites nothing is unchecked, not clean.
+
+    This is the dominant shape of real output from the smaller models. On the
+    nine live eval cases `llama3.2` produced three to seven evidential claims
+    per answer and cited a line for none of them, every time — so "0
+    fabricated citations" described an absence of evidence rather than a
+    verified answer.
+    """
+
+    def test_an_answer_that_cites_nothing_is_flagged(self):
+        answer = (
+            "The order service is experiencing repeated failures when publishing. "
+            "The notification service reported a connection timeout to its upstream. "
+            "The root cause appears to be a broker outage affecting both services."
+        )
+        report = verify(answer, SOURCES)
+        assert report.unverified
+        assert not report.clean
+
+    def test_the_warning_says_nothing_was_checked(self):
+        answer = (
+            "The order service is experiencing repeated failures when publishing. "
+            "The notification service reported a connection timeout to its upstream."
+        )
+        text = format_report(verify(answer, SOURCES))
+        assert "NOTHING TO VERIFY" in text
+        assert "was checked" in text
+
+    def test_one_citation_is_enough_to_leave_this_path(self):
+        """Partial coverage is a different, milder finding."""
+        answer = (
+            "The order service failed to publish to Kafka [L12]. "
+            "The notification service reported a connection timeout to its upstream."
+        )
+        report = verify(answer, SOURCES)
+        assert not report.unverified
+        assert "NOTHING TO VERIFY" not in format_report(report)
+
+    def test_an_answer_with_no_factual_claims_is_not_flagged(self):
+        """Pure advice rests on no evidence and needs none."""
+        answer = (
+            "Investigate the Kafka cluster health and verify broker availability "
+            "before restarting the order service."
+        )
+        report = verify(answer, SOURCES)
+        assert not report.unverified
+        assert report.clean
+
+    def test_headings_alone_are_not_flagged(self):
+        assert not verify("**Summary**\n**Findings**", SOURCES).unverified
+
+    def test_it_changes_nothing_on_the_labelled_set(self):
+        """Measured, not assumed.
+
+        This rule was added for real model output. It must not quietly move
+        the benchmark numbers, and it does not: no answer in any of the three
+        labelled lists trips it.
+        """
+        from evals import verifier_bench
+
+        everything = (
+            verifier_bench.HONEST + verifier_bench.DISHONEST + verifier_bench.BLIND_SPOTS
+        )
+        tripped = [
+            item.why
+            for item in everything
+            if verify(item.answer, item.sources, suspicious_ids(item.sources)).unverified
+        ]
+        assert tripped == []

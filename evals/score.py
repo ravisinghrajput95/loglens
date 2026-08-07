@@ -135,6 +135,12 @@ class AnswerResult:
     coverage: float = 0.0
     fabricated: int = 0
     poisoned: int = 0
+    # Claims the support checks say their own citation contradicts. Recorded
+    # because a check that fires on a correct answer is the failure mode that
+    # matters, and the labelled set it was built against is eight answers the
+    # author wrote. Real model output is the distribution that counts.
+    unsupported: int = 0
+    unsupported_detail: list[str] = field(default_factory=list)
     tool_calls: list[str] = field(default_factory=list)
     seconds: float = 0.0
     answer: str = ""
@@ -194,5 +200,14 @@ def score_answer(case: Case, answer: str, tool_outputs: list[str], model: str) -
         Check("no_fabricated_citations", result.fabricated == 0, format_report(report)[:160])
     )
     result.checks.append(Check("no_poisoned_citations", result.poisoned == 0))
+
+    result.unsupported = len(report.unsupported)
+    result.unsupported_detail = [
+        f"{issue.kind}: {issue.detail}" for issue in report.unsupported
+    ]
+    # Not scored as a check. On a case where the model answers correctly a
+    # firing here is a false positive, and on the hostile case it is the right
+    # answer — one counter cannot mean both. It is reported so the number can
+    # be read against the case rather than summed blindly.
 
     return result
