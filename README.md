@@ -485,7 +485,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add a log format, and
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 532 tests
+pytest              # 563 tests
 python -m evals.run
 ruff check . && ruff format --check .
 ```
@@ -504,6 +504,7 @@ loglens/
 ├── safety.py     injection detection and fencing of untrusted content
 ├── verify.py     citation integrity, coverage, poisoned-evidence checks
 ├── support.py    does the cited line contradict the claim? narrowly, and why
+├── ui.py         the browser view — a second reader of analysis.py, optional
 └── cli.py        argument parsing, interactive session, streaming
 ```
 
